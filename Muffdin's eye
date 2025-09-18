@@ -5,8 +5,8 @@ import sqlite3
 import html
 import random
 
-bot = telebot.TeleBot("8420454861:AAFLWXT_Ps-0CaV8kDXOeEi3jAZupsFkJQY", parse_mode='HTML')
-me = 7024206229
+bot = telebot.TeleBot("token", parse_mode='HTML')
+me = my_id
 
 def safe(val):
     if val is None:
