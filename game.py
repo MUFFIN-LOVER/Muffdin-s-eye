@@ -3,8 +3,8 @@ import sqlite3
 import random
 import time
 
-TOKEN = "8212352418:AAHg-8-okjOGZ3E-LpCdPuSsLqaa-S6h7T4"
-bot = telebot.TeleBot("8212352418:AAHg-8-okjOGZ3E-LpCdPuSsLqaa-S6h7T4")
+TOKEN = "bot_token"
+bot = telebot.TeleBot("my_token")
 
 # === база данных ===
 conn = sqlite3.connect("game.db", check_same_thread=False)
@@ -159,4 +159,5 @@ def top_world(message):
     bot.reply_to(message, text)
 
 # === запуск ==
+
 bot.polling(none_stop=True)
