@@ -4,15 +4,15 @@ from datetime import datetime
 import html
 
 # Токен и ID разработчика
-bot = telebot.TeleBot("8212352418:AAHg-8-okjOGZ3E-LpCdPuSsLqaa-S6h7T4", parse_mode='HTML')
-me = 8295751364  # Твой Telegram user ID
+bot = telebot.TeleBot("bot_token", parse_mode='HTML')
+me = my_token  # Твой Telegram user ID
 
 # Команда /start
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     markup = types.InlineKeyboardMarkup()
     btn0 = types.InlineKeyboardButton(
-        text="➕ Добавить бота", url="https://t.me/ArgusM_bot?startgroup=true"
+        text="➕ Добавить бота", url="https://t.me/BOT_TAG?startgroup=true"
     )
     markup.add(btn0)
 
