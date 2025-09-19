@@ -1,62 +1,34 @@
 import telebot
 from telebot import types
-from datetime import datetime, timedelta
-import sqlite3
+from datetime import datetime
 import html
-import random
 
-bot = telebot.TeleBot("token", parse_mode='HTML')
-me = my_id
+# Токен и ID разработчика
+bot = telebot.TeleBot("8212352418:AAHg-8-okjOGZ3E-LpCdPuSsLqaa-S6h7T4", parse_mode='HTML')
+me = 8295751364  # Твой Telegram user ID
 
-def safe(val):
-    if val is None:
-        return None
-    if isinstance(val, list):
-        return "\n".join(safe(v) for v in val if v is not None)
-    if hasattr(val, '__dict__'):
-        if val.__class__.__name__ == "MessageEntity":
-            return f"тип: {val.type}, offset: {val.offset}, длина: {val.length}"
-        return str({k: safe(v) for k, v in val.__dict__.items() if v is not None})
-    return html.escape(str(val))
-
-
+# Команда /start
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-
-    conn = sqlite3.connect("emojis.db")
-    cursor = conn.cursor()
-    cursor.execute("""CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT,user_id INTEGER UNIQUE,time TEXT,emojis TEXT,money INTEGER UNIQUE)""")
-    conn.commit()
-    conn.close()
-
     markup = types.InlineKeyboardMarkup()
     btn0 = types.InlineKeyboardButton(
-        text="➕ Добавить бота", url="https://t.me/YOUR_BOT_USERNAME?startgroup=true"
+        text="➕ Добавить бота", url="https://t.me/ArgusM_bot?startgroup=true"
     )
     markup.add(btn0)
 
     bot.send_message(
         message.chat.id,
-        "<b>Привет!\nЯ совсем молодой бот и нахожусь в разработке!!! ⚠\n"
-        "Но ты уже можешь добавить небольшую игру 'Ludik' от меня👇</b>",
+        "<b>Привет!\nЯ молодой бот и нахожусь в разработке! ⚠\n"
+        "Ты уже можешь добавить игру 'Ludik' от меня👇</b>",
         reply_markup=markup
     )
 
-@bot.message_handler(commands=['info'])
-def send_info(message):
-    text = (
-        "<b>📌 БЛИЖАЙШИЕ ПЛАНЫ РАЗРАБОТЧИКОВ</b>\n\n"
-        "<b>1.</b> Добавление большего количества инструментов для модерации чатов ⚖\n\n"
-        "<b>2.</b> Улучшение имеющихся функций и добавление доната 💶\n\n"
-        "<b>3.</b> Вы можете предложить свои идеи, добавив '!!' в начале сообщения✉"
-    )
-    bot.send_message(message.chat.id, text)
-
+# Извлечение важных сущностей из сообщения
 def extract_relevant_entities(message):
     if not message.entities or not message.text:
         return []
 
-    relevant_types = {'url', 'email', 'phone_number', 'hashtag'}
+    relevant_types = {'url', 'email', 'phone_number'}
     extracted = []
 
     for entity in message.entities:
@@ -64,59 +36,72 @@ def extract_relevant_entities(message):
             start = entity.offset
             end = start + entity.length
             entity_text = message.text[start:end]
-            extracted.append(f"{entity.type}: {entity_text}")
+            extracted.append(f"{entity.type}: {html.escape(entity_text)}")
 
     return extracted
 
+# Обработка всех сообщений
 @bot.message_handler(func=lambda m: True)
 def handle_all_messages(message):
+    # Получение сущностей
     relevant_entities = extract_relevant_entities(message)
     time_str = datetime.fromtimestamp(message.date).strftime("%d.%m.%Y %H:%M:%S")
 
+    # Сбор информации
     lines = []
     lines.append("<b>ЛИЧНОСТЬ</b>")
     if message.from_user.first_name:
-        lines.append(f"Имя: {safe(message.from_user.first_name)}")
+        lines.append(f"Имя: {html.escape(message.from_user.first_name)}")
     if message.from_user.last_name:
-        lines.append(f"Фамилия: {safe(message.from_user.last_name)}")
+        lines.append(f"Фамилия: {html.escape(message.from_user.last_name)}")
     if message.from_user.username:
-        lines.append(f"Юзернейм: @{safe(message.from_user.username)}")
+        lines.append(f"Юзернейм: @{html.escape(message.from_user.username)}")
     lines.append(f"ID: {message.from_user.id}")
     lines.append(f"Бот: {message.from_user.is_bot}")
     if message.from_user.language_code:
-        lines.append(f"Язык: {safe(message.from_user.language_code)}")
+        lines.append(f"Язык: {html.escape(message.from_user.language_code)}")
     lines.append(f"Время отправки: {time_str}\n")
 
     lines.append("<b>ЧАТ</b>")
     lines.append(f"ID Чата: {message.chat.id}")
     lines.append(f"Тип чата: {message.chat.type}")
     if message.chat.title:
-        lines.append(f"Название чата: {safe(message.chat.title)}")
+        lines.append(f"Название чата: {html.escape(message.chat.title)}")
     if message.chat.username:
-        lines.append(f"Юзернейм чата: @{safe(message.chat.username)}")
-    else:
-        lines.append("Юзернейм чата: нету")
-    if message.left_chat_member:
-        lines.append("Пользователь вышел из чата: Да")
-    if message.new_chat_members:
-        lines.append(f"Новые участники: {safe(message.new_chat_members)}")
+        lines.append(f"Юзернейм чата: @{html.escape(message.chat.username)}")
 
+    # Новые участники
+    if message.new_chat_members:
+        members = ', '.join(
+            html.escape(u.first_name or '') for u in message.new_chat_members
+        )
+        lines.append(f"Новые участники: {members}")
+
+    # Важные сущности
     if relevant_entities:
-        lines.append("\n<b>Важные сущности из сообщения:</b>")
+        lines.append("\n<b>Сущности:</b>")
         lines.extend(relevant_entities)
 
+    # Собираем итоговый текст
     base_info = "\n".join(lines)
     if len(base_info) > 4000:
         base_info = base_info[:3990] + "\n<i>Обрезано...</i>"
 
+    # Проверка на идею (!!)
     if message.text and message.text.startswith("!!"):
-        bot.send_message(message.chat.id, "<b>Спасибо за сотрудничество!</b>")
+        bot.send_message(message.chat.id, "<b>Спасибо за идею!</b>")
         idea_text = f"\n<b>ИДЕЯ:</b> {html.escape(message.text[2:].strip())}"
-        bot.send_message(me, base_info + idea_text)
+        bot.send_message(me, base_info + "\n\n" + idea_text)
     else:
+        # Ответ пользователю / в чат
+        try:
+            bot.send_message(message.chat.id, "✅ Получено, спасибо!")
+        except Exception as e:
+            print(f"Ошибка при отправке в чат: {e}")
+
+        # Пересылаем разработчику
         bot.send_message(me, base_info)
 
-
-
-
+# Запуск бота
 bot.infinity_polling()
+
