@@ -2,26 +2,231 @@ import telebot
 from telebot import types
 from datetime import datetime
 import html
+import re
+import sqlite3
+import random
+import time
 
 # Токен и ID разработчика
-bot = telebot.TeleBot("bot_token", parse_mode='HTML')
-me = my_token  # Твой Telegram user ID
+bot = telebot.TeleBot("8212352418:AAFFVGiW7LTr7ptinNTufmHlAvc7P_ECRck", parse_mode='HTML')
+me = 8295751364  # Твой Telegram user ID
+
+conn = sqlite3.connect("game.db", check_same_thread=False)
+cursor = conn.cursor()
+
+# таблица игроков (глобальные очки и общий таймер)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS players (
+    user_id INTEGER PRIMARY KEY,
+    name TEXT,
+    points INTEGER DEFAULT 0,
+    last_dep INTEGER DEFAULT 0
+)
+""")
+
+# таблица для связи пользователей с чатами (чтобы показывать топ чата)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS chats (
+    user_id INTEGER,
+    chat_id INTEGER,
+    PRIMARY KEY(user_id, chat_id)
+)
+""")
+conn.commit()
+
+# === список предметов ===
+items = [
+    # база
+    {"emoji": "заработал 💴 ", "price": 5, "chance": 30},
+    {"emoji": "заработал 💵 ", "price": 10, "chance": 25},
+    {"emoji": "заработал 💶 ", "price": 20, "chance": 20},
+    {"emoji": "заработал 💷 ", "price": 30, "chance": 15},
+
+    # повезло
+    {"emoji": "нашёл 💰 ", "price": 50, "chance": 10},
+    {"emoji": "нашёл 💎 ", "price": 100, "chance": 5},
+    {"emoji": "ограюил банк 🏦 ", "price": 200, "chance": 3},
+
+    # джекпот
+    {"emoji": "нашёл 💳 ", "price": random.randint(0, 500), "chance": 5},
+    {"emoji": "нашёл 📀 с биткоинами ", "price": random.randint(300, 500), "chance": 2},
+
+    # потеря
+    {"emoji": "пропил 💸 ", "price": -5, "chance": 15},
+    {"emoji": "депнул 💸 ", "price": -10, "chance": 12},
+    {"emoji": "задонатил стримеру 💸 ", "price": -20, "chance": 10},
+
+    # пасхалка
+    {"emoji": "встетил Mr.Muffdin👾 ", "price": 0.666, "chance": 1},
+]
+
+def roll_item():
+    r = random.randint(1, sum(item["chance"] for item in items))
+    cumulative = 0
+    for item in items:
+        cumulative += item["chance"]
+        if r <= cumulative:
+            # динамический джекпот
+            if item["emoji"] in ["нашёл 💳", "нашёл 📀 с биткоинами"]:
+                if item["emoji"] == "нашёл 💳":
+                    item["price"] = random.randint(0, 500)
+                else:
+                    item["price"] = random.randint(300, 500)
+            return item
+
+# === функции работы с БД ===
+def get_player(user_id, name):
+    cursor.execute("SELECT * FROM players WHERE user_id=?", (user_id,))
+    player = cursor.fetchone()
+    if not player:
+        cursor.execute("INSERT INTO players (user_id, name) VALUES (?, ?)", (user_id, name))
+        conn.commit()
+        return (user_id, name, 0, 0)
+    else:
+        cursor.execute("UPDATE players SET name=? WHERE user_id=?", (name, user_id))
+        conn.commit()
+        return player
+
+def update_player(user_id, points=None, last_dep=None):
+    if points is not None and last_dep is not None:
+        cursor.execute("UPDATE players SET points=?, last_dep=? WHERE user_id=?", (points, last_dep, user_id))
+    elif points is not None:
+        cursor.execute("UPDATE players SET points=? WHERE user_id=?", (points, user_id))
+    elif last_dep is not None:
+        cursor.execute("UPDATE players SET last_dep=? WHERE user_id=?", (last_dep, user_id))
+    conn.commit()
+
+def register_chat(user_id, chat_id):
+    cursor.execute("SELECT * FROM chats WHERE user_id=? AND chat_id=?", (user_id, chat_id))
+    if not cursor.fetchone():
+        cursor.execute("INSERT INTO chats (user_id, chat_id) VALUES (?, ?)", (user_id, chat_id))
+        conn.commit()
+
+# === Команда /reset с подтверждением ===
+@bot.message_handler(commands=["reset"])
+def reset_confirm(message):
+    if message.chat.type == "private":
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn_yes = types.InlineKeyboardButton(text="Да", callback_data="reset_yes")
+        btn_no = types.InlineKeyboardButton(text="Нет", callback_data="reset_no")
+        markup.add(btn_yes, btn_no)
+
+        bot.send_message(
+            chat_id=message.chat.id,
+            text="Вы уверены, что хотите обанкротиться?",
+            reply_markup=markup
+        )
+    else:
+        bot.send_message(message.chat.id,"Эта команда доступна только в личных сообщениях!")
+
+# === Обработка нажатий на кнопки ===
+@bot.callback_query_handler(func=lambda call: call.data.startswith("reset_"))
+def reset_callback(call):
+    if call.data == "reset_yes":
+        cursor.execute("UPDATE players SET points=0 WHERE user_id=?", (call.from_user.id,))
+        conn.commit()
+        bot.answer_callback_query(call.id, "Вы обанкротились 😢")
+        bot.send_message(call.message.chat.id, "Ваши очки обнулены ✅")
+    elif call.data == "reset_no":
+        bot.answer_callback_query(call.id, "Отмена")
+        bot.send_message(call.message.chat.id, "Вы отменили обнуление очков ✅")
+
+# === Команды игры ===
+@bot.message_handler(commands=["dep"])
+def dep(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    name = message.from_user.first_name
+
+    register_chat(user_id, chat_id)
+    player = get_player(user_id, name)
+    points = player[2]
+    last_dep = player[3]
+    current_time = int(time.time())
+
+    if current_time - last_dep >= 8*3600:
+        item = roll_item()
+        new_points = points + item["price"]
+        update_player(user_id, new_points, current_time)
+        bot.reply_to(message,
+            f"{name}, ты {item['emoji']}{item['price']}€!\n"
+            f"Теперь у тебя {new_points}€!"
+        )
+    else:
+        remaining = 8*3600 - (current_time - last_dep)
+        hours = remaining // 3600
+        minutes = (remaining % 3600) // 60
+        bot.reply_to(message, f"{name}, жди ещё {hours} ч {minutes} мин.")
+
+@bot.message_handler(commands=["stats"])
+def stats(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    name = message.from_user.first_name
+
+    register_chat(user_id, chat_id)
+    player = get_player(user_id, name)
+    points = player[2]
+    last_dep = player[3]
+    current_time = int(time.time())
+
+    if current_time - last_dep >= 8*3600:
+        wait = "Можно депать!"
+    else:
+        remaining = 8*3600 - (current_time - last_dep)
+        hours = remaining // 3600
+        minutes = (remaining % 3600) // 60
+        wait = f"Ждать ещё {hours} ч {minutes} мин"
+
+    bot.reply_to(message, f"{name}, твой капитал: {points}\n{wait}")
+
+@bot.message_handler(commands=["topchat"])
+def top_chat(message):
+    chat_id = message.chat.id
+    cursor.execute("""
+        SELECT p.name, p.points
+        FROM players p
+        JOIN chats c ON p.user_id = c.user_id
+        WHERE c.chat_id=?
+        ORDER BY p.points DESC LIMIT 10
+    """, (chat_id,))
+    leaders = cursor.fetchall()
+    text = "🏆 ТОП игроков чата:\n"
+    for i, (name, points) in enumerate(leaders, start=1):
+        text += f"{i}. {name} — {points} €!\n"
+    bot.reply_to(message, text)
+
+@bot.message_handler(commands=["topworld"])
+def top_world(message):
+    cursor.execute("""
+        SELECT name, points
+        FROM players
+        ORDER BY points DESC LIMIT 10
+    """)
+    leaders = cursor.fetchall()
+    text = "🌍 ТОП игроков мира:\n"
+    for i, (name, points) in enumerate(leaders, start=1):
+        text += f"{i}. {name} — {points} €!\n"
+    bot.reply_to(message, text)
 
 # Команда /start
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     markup = types.InlineKeyboardMarkup()
     btn0 = types.InlineKeyboardButton(
-        text="➕ Добавить бота", url="https://t.me/BOT_TAG?startgroup=true"
+        text="➕ Добавь бота в свой канал/чат!",
+        url="https://t.me/ArgusM_bot?startgroup=true"
     )
-    markup.add(btn0)
+    btn1 = types.InlineKeyboardButton("Админка👑", callback_data="админка")
+    btn2 = types.InlineKeyboardButton("Обратная связь🎭", callback_data="обратная связь")
+    markup.add(btn0, btn1, btn2)
 
-    bot.send_message(
-        message.chat.id,
-        "<b>Привет!\nЯ молодой бот и нахожусь в разработке! ⚠\n"
-        "Ты уже можешь добавить игру 'Ludik' от меня👇</b>",
-        reply_markup=markup
-    )
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("start_"))
+    def reset_callback(call):
+        if call.data == "админка":
+            bot.send_message(message.chat.id, "Введите пароль:")
+        elif call.data == "обратная связь":
+            bot.send_message(message.chat.id, "Для связи с разработчиками введи !! перед своим сообщением!")
 
 # Извлечение важных сущностей из сообщения
 def extract_relevant_entities(message):
@@ -92,16 +297,14 @@ def handle_all_messages(message):
         bot.send_message(message.chat.id, "<b>Спасибо за идею!</b>")
         idea_text = f"\n<b>ИДЕЯ:</b> {html.escape(message.text[2:].strip())}"
         bot.send_message(me, base_info + "\n\n" + idea_text)
+        bot.send_message(message.chat.id, "✅ Получено, спасибо!")
+    elif re.search(r'!!+', message.text):
+        bot.send_message(message.chat.id, "Произошла ошибка!\nПоставьте !! перед сообщением что бы связаться с нами!")
+        bot.send_message(me, base_info)
     else:
-        # Ответ пользователю / в чат
-        try:
-            bot.send_message(message.chat.id, "✅ Получено, спасибо!")
-        except Exception as e:
-            print(f"Ошибка при отправке в чат: {e}")
-
-        # Пересылаем разработчику
         bot.send_message(me, base_info)
 
 # Запуск бота
 bot.infinity_polling()
+
 
