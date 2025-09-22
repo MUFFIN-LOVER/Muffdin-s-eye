@@ -8,13 +8,15 @@ import random
 import time
 
 # Токен и ID разработчика
-bot = telebot.TeleBot("8212352418:AAFFVGiW7LTr7ptinNTufmHlAvc7P_ECRck", parse_mode='HTML')
+bot = telebot.TeleBot("8212352418:AAHjIWnq36vPg9Oxl7tsFWpUpd1xDNdWRF8", parse_mode='HTML')
+bot.remove_webhook()
 me = 8295751364  # Твой Telegram user ID
 
+# Подключение к базе данных
 conn = sqlite3.connect("game.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# таблица игроков (глобальные очки и общий таймер)
+# Таблицы
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS players (
     user_id INTEGER PRIMARY KEY,
@@ -24,7 +26,6 @@ CREATE TABLE IF NOT EXISTS players (
 )
 """)
 
-# таблица для связи пользователей с чатами (чтобы показывать топ чата)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS chats (
     user_id INTEGER,
@@ -32,9 +33,18 @@ CREATE TABLE IF NOT EXISTS chats (
     PRIMARY KEY(user_id, chat_id)
 )
 """)
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS info (
+    user_id INTEGER,
+    chat_id INTEGER,
+    PRIMARY KEY(user_id, chat_id)
+)
+""")
+
 conn.commit()
 
-# === список предметов ===
+# === Список предметов ===
 items = [
     # база
     {"emoji": "заработал 💴 ", "price": 5, "chance": 30},
@@ -45,7 +55,7 @@ items = [
     # повезло
     {"emoji": "нашёл 💰 ", "price": 50, "chance": 10},
     {"emoji": "нашёл 💎 ", "price": 100, "chance": 5},
-    {"emoji": "ограюил банк 🏦 ", "price": 200, "chance": 3},
+    {"emoji": "ограбил банк 🏦 ", "price": 200, "chance": 3},
 
     # джекпот
     {"emoji": "нашёл 💳 ", "price": random.randint(0, 500), "chance": 5},
@@ -74,7 +84,7 @@ def roll_item():
                     item["price"] = random.randint(300, 500)
             return item
 
-# === функции работы с БД ===
+# === Функции работы с БД ===
 def get_player(user_id, name):
     cursor.execute("SELECT * FROM players WHERE user_id=?", (user_id,))
     player = cursor.fetchone()
@@ -102,7 +112,7 @@ def register_chat(user_id, chat_id):
         cursor.execute("INSERT INTO chats (user_id, chat_id) VALUES (?, ?)", (user_id, chat_id))
         conn.commit()
 
-# === Команда /reset с подтверждением ===
+# === Команда /reset ===
 @bot.message_handler(commands=["reset"])
 def reset_confirm(message):
     if message.chat.type == "private":
@@ -110,18 +120,13 @@ def reset_confirm(message):
         btn_yes = types.InlineKeyboardButton(text="Да", callback_data="reset_yes")
         btn_no = types.InlineKeyboardButton(text="Нет", callback_data="reset_no")
         markup.add(btn_yes, btn_no)
-
-        bot.send_message(
-            chat_id=message.chat.id,
-            text="Вы уверены, что хотите обанкротиться?",
-            reply_markup=markup
-        )
+        bot.send_message(chat_id=message.chat.id, text="Вы уверены, что хотите обанкротиться?", reply_markup=markup)
     else:
         bot.send_message(message.chat.id,"Эта команда доступна только в личных сообщениях!")
 
-# === Обработка нажатий на кнопки ===
 @bot.callback_query_handler(func=lambda call: call.data.startswith("reset_"))
 def reset_callback(call):
+    bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
     if call.data == "reset_yes":
         cursor.execute("UPDATE players SET points=0 WHERE user_id=?", (call.from_user.id,))
         conn.commit()
@@ -137,21 +142,16 @@ def dep(message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     name = message.from_user.first_name
-
     register_chat(user_id, chat_id)
     player = get_player(user_id, name)
     points = player[2]
     last_dep = player[3]
     current_time = int(time.time())
-
     if current_time - last_dep >= 8*3600:
         item = roll_item()
         new_points = points + item["price"]
         update_player(user_id, new_points, current_time)
-        bot.reply_to(message,
-            f"{name}, ты {item['emoji']}{item['price']}€!\n"
-            f"Теперь у тебя {new_points}€!"
-        )
+        bot.reply_to(message, f"{name}, ты {item['emoji']}{item['price']}€!\nТеперь у тебя {new_points}€!")
     else:
         remaining = 8*3600 - (current_time - last_dep)
         hours = remaining // 3600
@@ -163,13 +163,11 @@ def stats(message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     name = message.from_user.first_name
-
     register_chat(user_id, chat_id)
     player = get_player(user_id, name)
     points = player[2]
     last_dep = player[3]
     current_time = int(time.time())
-
     if current_time - last_dep >= 8*3600:
         wait = "Можно депать!"
     else:
@@ -177,18 +175,15 @@ def stats(message):
         hours = remaining // 3600
         minutes = (remaining % 3600) // 60
         wait = f"Ждать ещё {hours} ч {minutes} мин"
-
     bot.reply_to(message, f"{name}, твой капитал: {points}\n{wait}")
 
 @bot.message_handler(commands=["topchat"])
 def top_chat(message):
     chat_id = message.chat.id
     cursor.execute("""
-        SELECT p.name, p.points
-        FROM players p
+        SELECT p.name, p.points FROM players p
         JOIN chats c ON p.user_id = c.user_id
-        WHERE c.chat_id=?
-        ORDER BY p.points DESC LIMIT 10
+        WHERE c.chat_id=? ORDER BY p.points DESC LIMIT 10
     """, (chat_id,))
     leaders = cursor.fetchall()
     text = "🏆 ТОП игроков чата:\n"
@@ -198,61 +193,62 @@ def top_chat(message):
 
 @bot.message_handler(commands=["topworld"])
 def top_world(message):
-    cursor.execute("""
-        SELECT name, points
-        FROM players
-        ORDER BY points DESC LIMIT 10
-    """)
+    cursor.execute("SELECT name, points FROM players ORDER BY points DESC LIMIT 10")
     leaders = cursor.fetchall()
     text = "🌍 ТОП игроков мира:\n"
     for i, (name, points) in enumerate(leaders, start=1):
         text += f"{i}. {name} — {points} €!\n"
     bot.reply_to(message, text)
 
-# Команда /start
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
-    markup = types.InlineKeyboardMarkup()
-    btn0 = types.InlineKeyboardButton(
-        text="➕ Добавь бота в свой канал/чат!",
-        url="https://t.me/ArgusM_bot?startgroup=true"
-    )
-    btn1 = types.InlineKeyboardButton("Админка👑", callback_data="админка")
-    btn2 = types.InlineKeyboardButton("Обратная связь🎭", callback_data="обратная связь")
-    markup.add(btn0, btn1, btn2)
+def send_menu(message):
+    if message.chat.type != "private":
+        bot.send_message(message.chat.id, "Эта команда доступна только в личных сообщениях!")
+        return
+    chat_id = message.chat.id
+    inline_markup = types.InlineKeyboardMarkup(row_width=1)
+    btn_link1 = types.InlineKeyboardButton("➕ Добавь бота в свой канал/чат!", url="https://t.me/ArgusM_bot?startgroup=true")
+    btn_link2 = types.InlineKeyboardButton("Канал Mr.MUFFDIN👾", url="https://t.me/+wDw25hUBPd1mMGVi")
+    inline_markup.add(btn_link1, btn_link2)
+    photo_path = r"Photo/photo_2025-09-20_17-49-18.jpg"
+    with open(photo_path, "rb") as photo_file:
+        bot.send_photo(chat_id, photo=photo_file, reply_markup=inline_markup)
+    reply_markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
+    reply_markup.row("Админка👑", "Обратная связь🎭")
 
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("start_"))
-    def reset_callback(call):
-        if call.data == "админка":
-            bot.send_message(message.chat.id, "Введите пароль:")
-        elif call.data == "обратная связь":
-            bot.send_message(message.chat.id, "Для связи с разработчиками введи !! перед своим сообщением!")
+@bot.message_handler(func=lambda m: m.text in ["Админка👑", "Обратная связь🎭"])
+def handle_menu_choice(message):
+    chat_id = message.chat.id
+    if message.text == "Админка👑":
+        msg = bot.send_message(chat_id, "Введите пароль:")
+        def check_password(m):
+            if m.text == "Обратная связь🎭":
+                bot.send_message(chat_id, "Для связи с разработчиками введи !! перед своим сообщением!")
+            elif m.text == "2395":
+                bot.send_message(chat_id, "Пароль верный! Добро пожаловать в админку.")
+            else:
+                bot.send_message(chat_id, "Неверный пароль!")
+        bot.register_next_step_handler(msg, check_password)
+    elif message.text == "Обратная связь🎭":
+        bot.send_message(chat_id, "Для связи с разработчиками введи !! перед своим сообщением!")
 
-# Извлечение важных сущностей из сообщения
 def extract_relevant_entities(message):
     if not message.entities or not message.text:
         return []
-
     relevant_types = {'url', 'email', 'phone_number'}
     extracted = []
-
     for entity in message.entities:
         if entity.type in relevant_types:
             start = entity.offset
             end = start + entity.length
             entity_text = message.text[start:end]
             extracted.append(f"{entity.type}: {html.escape(entity_text)}")
-
     return extracted
 
-# Обработка всех сообщений
 @bot.message_handler(func=lambda m: True)
 def handle_all_messages(message):
-    # Получение сущностей
     relevant_entities = extract_relevant_entities(message)
     time_str = datetime.fromtimestamp(message.date).strftime("%d.%m.%Y %H:%M:%S")
-
-    # Сбор информации
     lines = []
     lines.append("<b>ЛИЧНОСТЬ</b>")
     if message.from_user.first_name:
@@ -266,7 +262,6 @@ def handle_all_messages(message):
     if message.from_user.language_code:
         lines.append(f"Язык: {html.escape(message.from_user.language_code)}")
     lines.append(f"Время отправки: {time_str}\n")
-
     lines.append("<b>ЧАТ</b>")
     lines.append(f"ID Чата: {message.chat.id}")
     lines.append(f"Тип чата: {message.chat.type}")
@@ -274,25 +269,15 @@ def handle_all_messages(message):
         lines.append(f"Название чата: {html.escape(message.chat.title)}")
     if message.chat.username:
         lines.append(f"Юзернейм чата: @{html.escape(message.chat.username)}")
-
-    # Новые участники
     if message.new_chat_members:
-        members = ', '.join(
-            html.escape(u.first_name or '') for u in message.new_chat_members
-        )
+        members = ', '.join(html.escape(u.first_name or '') for u in message.new_chat_members)
         lines.append(f"Новые участники: {members}")
-
-    # Важные сущности
     if relevant_entities:
         lines.append("\n<b>Сущности:</b>")
         lines.extend(relevant_entities)
-
-    # Собираем итоговый текст
     base_info = "\n".join(lines)
     if len(base_info) > 4000:
         base_info = base_info[:3990] + "\n<i>Обрезано...</i>"
-
-    # Проверка на идею (!!)
     if message.text and message.text.startswith("!!"):
         bot.send_message(message.chat.id, "<b>Спасибо за идею!</b>")
         idea_text = f"\n<b>ИДЕЯ:</b> {html.escape(message.text[2:].strip())}"
@@ -306,5 +291,3 @@ def handle_all_messages(message):
 
 # Запуск бота
 bot.infinity_polling()
-
-
