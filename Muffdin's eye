@@ -8,10 +8,9 @@ import random
 import time
 
 # Токен и ID разработчика
-bot = telebot.TeleBot("8212352418:AAGPJ1Ng0v8AD1sYhdRrD6rCX2rtr7LOVeI", parse_mode='HTML')
+bot = telebot.TeleBot("BOT_TOKEN", parse_mode='HTML')
 bot.remove_webhook()
-me = 8295751364  # Твой Telegram user ID
-
+me = your_id
 # Подключение к базе данных
 conn = sqlite3.connect("game.db", check_same_thread=False)
 cursor = conn.cursor()
