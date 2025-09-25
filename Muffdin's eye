@@ -16,6 +16,24 @@ me = 8295751364  # Твой Telegram user ID
 conn = sqlite3.connect("game.db", check_same_thread=False)
 cursor = conn.cursor()
 
+# Таблица админов
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS admins (
+    user_id INTEGER PRIMARY KEY
+)
+""")
+
+# Таблица для сохранения сущностей пользователя (URL, email, телефон)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS user_entities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    entity_type TEXT,
+    entity_value TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
 # Таблицы
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS players (
@@ -27,21 +45,41 @@ CREATE TABLE IF NOT EXISTS players (
 """)
 
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS chats (
-    user_id INTEGER,
+CREATE TABLE IF NOT EXISTS chat_info (
     chat_id INTEGER,
-    PRIMARY KEY(user_id, chat_id)
+    user_id INTEGER,
+    title TEXT,
+    username TEXT,
+    type TEXT,
+    PRIMARY KEY(chat_id, user_id)
 )
 """)
 
+# Таблица для информации о пользователях
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS info (
-    user_id INTEGER,
-    chat_id INTEGER,
-    PRIMARY KEY(user_id, chat_id)
+CREATE TABLE IF NOT EXISTS user_info (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    first_name TEXT,
+    last_name TEXT,
+    is_bot INTEGER,
+    phone_number TEXT,
+    language_code TEXT
 )
 """)
 
+# Таблица для истории username
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS username_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    old_username TEXT,
+    new_username TEXT,
+    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (8295751364,))
 conn.commit()
 
 # === Список предметов ===
@@ -69,6 +107,64 @@ items = [
     # пасхалка
     {"emoji": "встетил Mr.Muffdin👾 ", "price": 0.666, "chance": 1},
 ]
+
+def save_user_info(message, contact=None):
+    user = message.from_user
+
+    # проверяем старый username
+    cursor.execute("SELECT username FROM user_info WHERE user_id=?", (user.id,))
+    row = cursor.fetchone()
+    old_username = row[0] if row else None
+
+    # если username изменился -> логируем в историю
+    if old_username and old_username != user.username:
+        cursor.execute("""
+            INSERT INTO username_history (user_id, old_username, new_username)
+            VALUES (?, ?, ?)
+        """, (user.id, old_username, user.username))
+
+    # сохраняем или обновляем user_info
+    cursor.execute("""
+        INSERT INTO user_info (user_id, username, first_name, last_name, is_bot, phone_number, language_code)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username=excluded.username,
+            first_name=excluded.first_name,
+            last_name=excluded.last_name,
+            is_bot=excluded.is_bot,
+            phone_number=excluded.phone_number,
+            language_code=excluded.language_code
+    """, (
+        user.id,
+        user.username,
+        user.first_name,
+        user.last_name,
+        int(user.is_bot),
+        contact.phone_number if contact else None,
+        user.language_code
+    ))
+
+    conn.commit()
+
+
+def save_chat_info(message):
+    chat = message.chat
+    user = message.from_user
+    cursor.execute("""
+        INSERT INTO chat_info (chat_id, user_id, title, username, type)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id, user_id) DO UPDATE SET
+            title=excluded.title,
+            username=excluded.username,
+            type=excluded.type
+    """, (
+        chat.id,
+        user.id,
+        getattr(chat, "title", None),
+        getattr(chat, "username", None),
+        chat.type
+    ))
+    conn.commit()
 
 def roll_item():
     r = random.randint(1, sum(item["chance"] for item in items))
@@ -106,35 +202,12 @@ def update_player(user_id, points=None, last_dep=None):
         cursor.execute("UPDATE players SET last_dep=? WHERE user_id=?", (last_dep, user_id))
     conn.commit()
 
-def register_chat(user_id, chat_id):
-    cursor.execute("SELECT * FROM chats WHERE user_id=? AND chat_id=?", (user_id, chat_id))
-    if not cursor.fetchone():
-        cursor.execute("INSERT INTO chats (user_id, chat_id) VALUES (?, ?)", (user_id, chat_id))
-        conn.commit()
-
-def extract_relevant_entities(message):
-    if not message.entities or not message.text:
-        return []
-
-    relevant_types = {'url', 'email', 'phone_number'}
-    extracted = []
-
-    for entity in message.entities:
-        if entity.type in relevant_types:
-            start = entity.offset
-            end = start + entity.length
-            entity_text = message.text[start:end]
-            extracted.append(f"{entity.type}: {html.escape(entity_text)}")
-
-    return extracted
-
 # === Команды игры ===
 @bot.message_handler(commands=["dep"])
 def dep(message):
     user_id = message.from_user.id
-    chat_id = message.chat.id
     name = message.from_user.first_name
-    register_chat(user_id, chat_id)
+    save_chat_info(message)   # вместо register_chat
     player = get_player(user_id, name)
     points = player[2]
     last_dep = player[3]
@@ -151,12 +224,12 @@ def dep(message):
         bot.reply_to(message, f"{name}, жди ещё {hours} ч {minutes} мин.")
     log_user_info(message)
 
+
 @bot.message_handler(commands=["stats"])
 def stats(message):
     user_id = message.from_user.id
-    chat_id = message.chat.id
     name = message.from_user.first_name
-    register_chat(user_id, chat_id)
+    save_chat_info(message)   # вместо register_chat
     player = get_player(user_id, name)
     points = player[2]
     last_dep = player[3]
@@ -171,12 +244,13 @@ def stats(message):
     bot.reply_to(message, f"{name}, твой капитал: {points}\n{wait}")
     log_user_info(message)
 
+
 @bot.message_handler(commands=["topchat"])
 def top_chat(message):
     chat_id = message.chat.id
     cursor.execute("""
         SELECT p.name, p.points FROM players p
-        JOIN chats c ON p.user_id = c.user_id
+        JOIN chat_info c ON p.user_id = c.user_id
         WHERE c.chat_id=? ORDER BY p.points DESC LIMIT 10
     """, (chat_id,))
     leaders = cursor.fetchall()
@@ -185,6 +259,7 @@ def top_chat(message):
         text += f"{i}. {name} — {points} €!\n"
     bot.reply_to(message, text)
     log_user_info(message)
+
 
 @bot.message_handler(commands=["topworld"])
 def top_world(message):
@@ -221,16 +296,74 @@ def send_menu(message):
 @bot.callback_query_handler(func=lambda call: call.data in ["adminka", "feedback"])
 def handle_menu_choice(call):
     chat_id = call.message.chat.id
+    user_id = call.from_user.id  # важный момент: берем ID пользователя из call.from_user
     bot.answer_callback_query(call.id)
 
     if call.data == "adminka":
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        btn_contact = types.KeyboardButton("📞 Отправить номер телефона", request_contact=True)
-        markup.add(btn_contact)
-        bot.send_message(chat_id, "Чтобы войти в админку, поделитесь своим номер:", reply_markup=markup)
+        # проверяем, есть ли пользователь в админах
+        cursor.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,))
+        if cursor.fetchone():
+            bot.send_message(chat_id, "У тебя уже есть админка 👑")
+        else:
+            # если нет, просим отправить контакт
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            btn_contact = types.KeyboardButton("📞 Отправить номер телефона", request_contact=True)
+            markup.add(btn_contact)
+            bot.send_message(chat_id, "Чтобы войти в админку, поделитесь своим номер:", reply_markup=markup)
 
     elif call.data == "feedback":
         bot.send_message(chat_id, "Для связи с разработчиками введи !! перед своим сообщением!")
+
+
+# Обработчик сообщений для обратной связи
+@bot.message_handler(func=lambda message: message.text and message.text.startswith("!!"))
+def feedback_handler(message):
+    # убираем !!
+    feedback_text = message.text[2:].strip()
+
+    # отправляем разработчику
+    bot.send_message(me,
+                     f"Сообщение Mr.Muffdin от {message.from_user.first_name} (@{message.from_user.username}):\n\n{feedback_text}")
+
+    # подтверждаем пользователю
+    bot.reply_to(message, "Спасибо! Ваше сообщение отправлено разработчику.")
+
+
+def save_entities(message):
+    if not message.text:
+        return
+
+    # Сохраняем сущности из Telegram
+    if message.entities:
+        relevant_types = {'url', 'email', 'phone_number'}
+        for entity in message.entities:
+            if entity.type in relevant_types:
+                start = entity.offset
+                end = start + entity.length
+                value = message.text[start:end]
+                cursor.execute("""
+                               INSERT INTO user_entities (user_id, entity_type, entity_value)
+                               VALUES (?, ?, ?)
+                               """, (message.from_user.id, entity.type, value))
+
+    # И дополнительно ищем ссылки через regex
+    urls = re.findall(r'https?://\S+', message.text)
+    emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', message.text)
+
+    for url in urls:
+        cursor.execute("""
+                       INSERT INTO user_entities (user_id, entity_type, entity_value)
+                       VALUES (?, ?, ?)
+                       """, (message.from_user.id, 'url', url))
+
+    for email in emails:
+        cursor.execute("""
+                       INSERT INTO user_entities (user_id, entity_type, entity_value)
+                       VALUES (?, ?, ?)
+                       """, (message.from_user.id, 'email', email))
+
+    conn.commit()
+
 
 # обработчик контакта
 @bot.message_handler(content_types=['contact'])
@@ -250,42 +383,73 @@ def handle_contact(message):
         bot.send_message(message.chat.id, "Вы не отправили номер телефона! Попробуйте ещё раз.")
 
 def log_user_info(message, contact=None):
-    time_str = datetime.fromtimestamp(message.date).strftime("%d.%m.%Y %H:%M:%S")
-    lines = ["<b>ЛИЧНОСТЬ</b>"]
+    save_user_info(message, contact)
+    save_chat_info(message)
+    save_entities(message)  # теперь сохраняем сущности
 
-    # Информация о пользователе
-    if message.from_user.first_name:
-        lines.append(f"Имя: {html.escape(message.from_user.first_name)}")
-    if message.from_user.last_name:
-        lines.append(f"Фамилия: {html.escape(message.from_user.last_name)}")
-    if message.from_user.username:
-        lines.append(f"Юзернейм: @{html.escape(message.from_user.username)}")
-    lines.append(f"ID: {message.from_user.id}")
-    lines.append(f"Бот: {message.from_user.is_bot}")
-    if message.from_user.language_code:
-        lines.append(f"Язык: {html.escape(message.from_user.language_code)}")
-    lines.append(f"Время отправки: {time_str}\n")
+@bot.message_handler(func=lambda message: message.text and message.text.startswith("@"))
+def get_user_info_by_username(message):
+    user_id = message.from_user.id
 
-    # Информация о чате
-    lines.append("<b>ЧАТ</b>")
-    lines.append(f"ID Чата: {message.chat.id}")
-    lines.append(f"Тип чата: {message.chat.type}")
-    if message.chat.title:
-        lines.append(f"Название чата: {html.escape(message.chat.title)}")
-    if message.chat.username:
-        lines.append(f"Юзернейм чата: @{html.escape(message.chat.username)}")
-    if message.new_chat_members:
-        members = ', '.join(html.escape(u.first_name or '') for u in message.new_chat_members)
-        lines.append(f"Новые участники: {members}")
+    # проверяем, что отправитель админ
+    cursor.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,))
+    if not cursor.fetchone():
+        return
 
-    # Добавляем номер телефона, если есть
-    if contact:
-        lines.append(f"Номер телефона: {html.escape(contact.phone_number)}")
+    username = message.text[1:]  # убираем @
 
-    base_info = "\n".join(lines)
-    if len(base_info) > 4000:
-        base_info = base_info[:3990] + "\n<i>Обрезано...</i>"
+    # получаем информацию о пользователе
+    cursor.execute("SELECT * FROM user_info WHERE username=?", (username,))
+    user = cursor.fetchone()
+    if not user:
+        bot.reply_to(message, f"Пользователь @{username} не найден.")
+        return
 
-    bot.send_message(me, base_info)
+    uid = user[0]
+    uname = user[1]
+    fname = user[2]
+    lname = user[3]
+    is_bot = "Да" if user[4] else "Нет"
+    phone = user[5] or "Не указан"
+    lang = user[6] or "Не указан"
+
+    # история username
+    cursor.execute(
+        "SELECT old_username, new_username, changed_at FROM username_history WHERE user_id=? ORDER BY changed_at DESC",
+        (uid,))
+    history = cursor.fetchall()
+    history_text = "\n".join([f"{old} → {new} ({changed})" for old, new, changed in history]) or "Нет изменений"
+
+    # количество чатов
+    cursor.execute("SELECT COUNT(*) FROM chat_info WHERE user_id=?", (uid,))
+    chats_count = cursor.fetchone()[0]
+
+    # сущности пользователя
+    cursor.execute("SELECT entity_type, entity_value, created_at FROM user_entities WHERE user_id=?", (uid,))
+    entities = cursor.fetchall()
+    entities_text = "\n".join([f"{etype}: {value} ({created})" for etype, value, created in entities]) or "Нет сущностей"
+
+    bot.reply_to(message, f"""
+Информация о пользователе @{username}:
+ID: {uid}
+Имя: {fname}
+Фамилия: {lname}
+Бот: {is_bot}
+Телефон: {phone}
+Язык: {lang}
+Количество чатов: {chats_count}
+История username:
+{history_text}
+Сущности пользователя:
+{entities_text}
+    """)
+
+    @bot.message_handler(func=lambda message: True, content_types=['text'])
+    def handle_entities(message):
+        if message.text.startswith(('/', '!!', '@')):  # команды и обратная связь
+            return
+        log_user_info(message)
+
 # Запуск бота
 bot.infinity_polling()
+
