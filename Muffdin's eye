@@ -6,8 +6,8 @@ import re
 import time
 
 # === Настройки бота ===
-TOKEN = "8212352418:AAGPJ1Ng0v8AD1sYhdRrD6rCX2rtr7LOVeI"
-ADMIN_ID = 8295751364
+TOKEN = ""
+ADMIN_ID = 
 
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 bot.remove_webhook()
