@@ -1,29 +1,32 @@
 import telebot
 from telebot import types
-from datetime import datetime
-import html
-import re
 import sqlite3
 import random
+import re
 import time
 
-# Токен и ID разработчика
-bot = telebot.TeleBot("", parse_mode='HTML')
-bot.remove_webhook()
-me =   # Твой Telegram user ID
+# === Настройки бота ===
+TOKEN = "8212352418:AAGPJ1Ng0v8AD1sYhdRrD6rCX2rtr7LOVeI"
+ADMIN_ID = 8295751364
 
-# Подключение к базе данных
+bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
+bot.remove_webhook()
+
+# === Подключение к базе данных ===
 conn = sqlite3.connect("game.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Таблица админов
+# === Создание таблиц ===
+
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS admins (
-    user_id INTEGER PRIMARY KEY
+CREATE TABLE IF NOT EXISTS search_limits (
+    user_id INTEGER PRIMARY KEY,
+    searches INTEGER DEFAULT 0,
+    unlimited INTEGER DEFAULT 0
 )
 """)
+conn.commit()
 
-# Таблица для сохранения сущностей пользователя (URL, email, телефон)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS user_entities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,7 +37,6 @@ CREATE TABLE IF NOT EXISTS user_entities (
 )
 """)
 
-# Таблицы
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS players (
     user_id INTEGER PRIMARY KEY,
@@ -55,7 +57,6 @@ CREATE TABLE IF NOT EXISTS chat_info (
 )
 """)
 
-# Таблица для информации о пользователях
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS user_info (
     user_id INTEGER PRIMARY KEY,
@@ -68,7 +69,6 @@ CREATE TABLE IF NOT EXISTS user_info (
 )
 """)
 
-# Таблица для истории username
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS username_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,84 +79,76 @@ CREATE TABLE IF NOT EXISTS username_history (
 )
 """)
 
-cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (8295751364,))
 conn.commit()
 
-# === Список предметов ===
+# === Список предметов для игры ===
 items = [
-    # база
     {"emoji": "заработал 💴 ", "price": 5, "chance": 30},
     {"emoji": "заработал 💵 ", "price": 10, "chance": 25},
     {"emoji": "заработал 💶 ", "price": 20, "chance": 20},
     {"emoji": "заработал 💷 ", "price": 30, "chance": 15},
-
-    # повезло
     {"emoji": "нашёл 💰 ", "price": 50, "chance": 10},
     {"emoji": "нашёл 💎 ", "price": 100, "chance": 5},
     {"emoji": "ограбил банк 🏦 ", "price": 200, "chance": 3},
-
-    # джекпот
     {"emoji": "нашёл 💳 ", "price": random.randint(0, 500), "chance": 5},
     {"emoji": "нашёл 📀 с биткоинами ", "price": random.randint(300, 500), "chance": 2},
-
-    # потеря
     {"emoji": "пропил 💸 ", "price": -5, "chance": 15},
     {"emoji": "депнул 💸 ", "price": -10, "chance": 12},
     {"emoji": "задонатил стримеру 💸 ", "price": -20, "chance": 10},
-
-    # пасхалка
-    {"emoji": "встетил Mr.Muffdin👾 ", "price": 0.666, "chance": 1},
+    {"emoji": "встретил Mr.Muffdin👾 ", "price": 0.666, "chance": 1},
 ]
 
+# === Функции работы с БД ===
 def save_user_info(message, contact=None):
     user = message.from_user
 
-    # проверяем старый username
-    cursor.execute("SELECT username FROM user_info WHERE user_id=?", (user.id,))
+    # Проверяем, есть ли уже запись
+    cursor.execute("SELECT phone_number, username FROM user_info WHERE user_id=?", (user.id,))
     row = cursor.fetchone()
-    old_username = row[0] if row else None
+    old_phone = row[0] if row else None
+    old_username = row[1] if row else None
 
-    # если username изменился -> логируем в историю
+    # Логируем историю username
     if old_username and old_username != user.username:
         cursor.execute("""
-            INSERT INTO username_history (user_id, old_username, new_username)
-            VALUES (?, ?, ?)
+        INSERT INTO username_history (user_id, old_username, new_username)
+        VALUES (?, ?, ?)
         """, (user.id, old_username, user.username))
 
-    # сохраняем или обновляем user_info
+    # Если прилетел новый контакт – сохраняем, иначе оставляем старый номер
+    new_phone = contact.phone_number if contact else old_phone
+
     cursor.execute("""
-        INSERT INTO user_info (user_id, username, first_name, last_name, is_bot, phone_number, language_code)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            username=excluded.username,
-            first_name=excluded.first_name,
-            last_name=excluded.last_name,
-            is_bot=excluded.is_bot,
-            phone_number=excluded.phone_number,
-            language_code=excluded.language_code
+    INSERT INTO user_info (user_id, username, first_name, last_name, is_bot, phone_number, language_code)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+        username=excluded.username,
+        first_name=excluded.first_name,
+        last_name=excluded.last_name,
+        is_bot=excluded.is_bot,
+        phone_number=excluded.phone_number,
+        language_code=excluded.language_code
     """, (
         user.id,
         user.username,
         user.first_name,
         user.last_name,
         int(user.is_bot),
-        contact.phone_number if contact else None,
+        new_phone,
         user.language_code
     ))
-
     conn.commit()
-
 
 def save_chat_info(message):
     chat = message.chat
     user = message.from_user
     cursor.execute("""
-        INSERT INTO chat_info (chat_id, user_id, title, username, type)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(chat_id, user_id) DO UPDATE SET
-            title=excluded.title,
-            username=excluded.username,
-            type=excluded.type
+    INSERT INTO chat_info (chat_id, user_id, title, username, type)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(chat_id, user_id) DO UPDATE SET
+        title=excluded.title,
+        username=excluded.username,
+        type=excluded.type
     """, (
         chat.id,
         user.id,
@@ -166,21 +158,52 @@ def save_chat_info(message):
     ))
     conn.commit()
 
+def save_entities(message):
+    if not message.text:
+        return
+
+    if message.entities:
+        relevant_types = {'url', 'email', 'phone_number'}
+        for entity in message.entities:
+            if entity.type in relevant_types:
+                start = entity.offset
+                end = start + entity.length
+                value = message.text[start:end]
+                cursor.execute("""
+                INSERT INTO user_entities (user_id, entity_type, entity_value)
+                VALUES (?, ?, ?)
+                """, (message.from_user.id, entity.type, value))
+
+    urls = re.findall(r'https?://\S+', message.text)
+    emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', message.text)
+    for url in urls:
+        cursor.execute("""
+        INSERT INTO user_entities (user_id, entity_type, entity_value)
+        VALUES (?, ?, ?)
+        """, (message.from_user.id, 'url', url))
+    for email in emails:
+        cursor.execute("""
+        INSERT INTO user_entities (user_id, entity_type, entity_value)
+        VALUES (?, ?, ?)
+        """, (message.from_user.id, 'email', email))
+
+    conn.commit()
+
+def log_user_info(message, contact=None):
+    save_user_info(message, contact)
+    save_chat_info(message)
+    save_entities(message)
+
 def roll_item():
     r = random.randint(1, sum(item["chance"] for item in items))
     cumulative = 0
     for item in items:
         cumulative += item["chance"]
         if r <= cumulative:
-            # динамический джекпот
             if item["emoji"] in ["нашёл 💳", "нашёл 📀 с биткоинами"]:
-                if item["emoji"] == "нашёл 💳":
-                    item["price"] = random.randint(0, 500)
-                else:
-                    item["price"] = random.randint(300, 500)
+                item["price"] = random.randint(0, 500) if item["emoji"] == "нашёл 💳" else random.randint(300, 500)
             return item
 
-# === Функции работы с БД ===
 def get_player(user_id, name):
     cursor.execute("SELECT * FROM players WHERE user_id=?", (user_id,))
     player = cursor.fetchone()
@@ -202,72 +225,184 @@ def update_player(user_id, points=None, last_dep=None):
         cursor.execute("UPDATE players SET last_dep=? WHERE user_id=?", (last_dep, user_id))
     conn.commit()
 
-# === Функция меню админа ===
-def show_admin_menu(chat_id):
-    markup = types.InlineKeyboardMarkup(row_width=2)
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    log_user_info(message)
+    send_main_menu(message.chat.id)
 
-    # обработчик контакта
+def send_main_menu(chat_id):
+    inline_markup = types.InlineKeyboardMarkup(row_width=1)
+    btn1 = types.InlineKeyboardButton("Поиск 🔍", callback_data="adminka")
+    btn2 = types.InlineKeyboardButton("Информация 📄", callback_data="feedback")
+    btn3 = types.InlineKeyboardButton("Прочее...", callback_data="other")
+    inline_markup.add(btn1, btn2, btn3)
 
-    btn1 = types.InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")
-    btn2 = types.InlineKeyboardButton("👥 Пользователи", callback_data="admin_users")
-    btn3 = types.InlineKeyboardButton("⚙ Настройки", callback_data="admin_settings")
-    btn4 = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+    photo_path = r"Photo/photo_2025-09-20_17-49-18.jpg"
+    with open(photo_path, "rb") as photo_file:
+        bot.send_photo(chat_id, photo=photo_file, reply_markup=inline_markup)
 
-    markup.add(btn1, btn2)
-    markup.add(btn3, btn4)
 
-    bot.send_message(chat_id, "👑 Панель администратора:", reply_markup=markup)
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_main")
+def handle_back(call):
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
 
-# === Команды игры ===
+    # Проверяем номер телефона
+    cursor.execute("SELECT phone_number FROM user_info WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    phone_saved = row and row[0]
+
+    if not phone_saved:
+        # Если телефона нет — просим отправить контакт
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        btn_contact = types.KeyboardButton("📞 Отправить номер телефона", request_contact=True)
+        markup.add(btn_contact)
+        bot.send_message(chat_id, "Чтобы продолжить, поделитесь своим номером:", reply_markup=markup)
+        return
+
+    # Если телефон есть — показываем меню
+    send_main_menu(chat_id)
+
+
+
+@bot.message_handler(func=lambda message: message.text and message.text.startswith("!!"))
+def feedback_handler(message):
+    feedback_text = message.text[2:].strip()
+    bot.send_message(ADMIN_ID, f"📩 Сообщение от {message.from_user.first_name} (@{message.from_user.username}):\n\n{feedback_text}")
+    bot.reply_to(message, "Спасибо! Ваше сообщение отправлено разработчику ✅")
+
+# === Callback-меню ===
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id
+    bot.answer_callback_query(call.id)
+
+    if call.data == "adminka":
+        cursor.execute("SELECT phone_number FROM user_info WHERE user_id=?", (user_id,))
+        row = cursor.fetchone()
+        phone_saved = row and row[0]
+        if not phone_saved:
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            btn_contact = types.KeyboardButton("📞 Отправить номер телефона", request_contact=True)
+            markup.add(btn_contact)
+            bot.send_message(chat_id, "Чтобы продолжить, поделитесь своим номером:", reply_markup=markup)
+        else:
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton("Тарифы 💵", callback_data="tariffs"),
+                types.InlineKeyboardButton("Поиск информации 🔍", callback_data="search"),
+                types.InlineKeyboardButton("Инфо ❕", callback_data="info"),
+                types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+            )
+            bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=markup)
+
+    elif call.data == "tariffs":
+        bot.send_message(chat_id, "📊 Доступные тарифы:\n\n1️⃣ Базовый – ...\n2️⃣ Премиум – ...")
+
+    elif call.data == "feedback":
+        bot.send_message(chat_id, "...")
+
+    elif call.data == "info":
+        bot.send_message(chat_id, "ℹ Тут можно написать общую информацию о поиске...")
+
+    elif call.data == "search":
+        bot.send_message(chat_id, "🔍 Введи данные для поиска информации...")
+
+    elif call.data == "other":
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("➕ Добавь бота в свой канал/чат!", url="https://t.me/ArgusM_bot?startgroup=true"),
+            types.InlineKeyboardButton("Канал Mr.MUFFDIN👾", url="https://t.me/+wDw25hUBPd1mMGVi"),
+            types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+        )
+        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=markup)
+
+    elif call.data == "back_to_main":
+        send_main_menu(call.message.chat.id)
+
+
+# === Контакты ===
+@bot.message_handler(content_types=['contact'])
+def handle_contact(message):
+    if not message.contact:
+        bot.send_message(message.chat.id, "Вы не отправили номер телефона! Попробуйте ещё раз.")
+        return
+
+    # Сохраняем номер в user_info
+    cursor.execute("""
+    INSERT INTO user_info (user_id, phone_number)
+    VALUES (?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET phone_number=excluded.phone_number
+    """, (message.from_user.id, message.contact.phone_number))
+    conn.commit()
+
+    # Логируем всё остальное
+    log_user_info(message, contact=message.contact)
+
+    # Показываем главное меню
+    send_main_menu(message.chat.id)
+
+    bot.send_message(message.chat.id, "✅ Номер сохранён! Теперь доступно меню поиска")
+
+
+# === Игровые команды ===
 @bot.message_handler(commands=["dep"])
 def dep(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    save_chat_info(message)   # вместо register_chat
+    save_chat_info(message)
+
     player = get_player(user_id, name)
     points = player[2]
     last_dep = player[3]
     current_time = int(time.time())
-    if current_time - last_dep >= 8*3600:
+
+    if current_time - last_dep >= 8 * 3600:
         item = roll_item()
         new_points = points + item["price"]
         update_player(user_id, new_points, current_time)
         bot.reply_to(message, f"{name}, ты {item['emoji']}{item['price']}€!\nТеперь у тебя {new_points}€!")
     else:
-        remaining = 8*3600 - (current_time - last_dep)
+        remaining = 8 * 3600 - (current_time - last_dep)
         hours = remaining // 3600
         minutes = (remaining % 3600) // 60
         bot.reply_to(message, f"{name}, жди ещё {hours} ч {minutes} мин.")
-    log_user_info(message)
 
+    log_user_info(message)
 
 @bot.message_handler(commands=["stats"])
 def stats(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    save_chat_info(message)   # вместо register_chat
+    save_chat_info(message)
+
     player = get_player(user_id, name)
     points = player[2]
     last_dep = player[3]
     current_time = int(time.time())
-    if current_time - last_dep >= 8*3600:
+
+    if current_time - last_dep >= 8 * 3600:
         wait = "Можно депать!"
     else:
-        remaining = 8*3600 - (current_time - last_dep)
+        remaining = 8 * 3600 - (current_time - last_dep)
         hours = remaining // 3600
         minutes = (remaining % 3600) // 60
         wait = f"Ждать ещё {hours} ч {minutes} мин"
+
     bot.reply_to(message, f"{name}, твой капитал: {points}\n{wait}")
     log_user_info(message)
-
 
 @bot.message_handler(commands=["topchat"])
 def top_chat(message):
     chat_id = message.chat.id
     cursor.execute("""
-        SELECT p.name, p.points FROM players p
-        JOIN chat_info c ON p.user_id = c.user_id
-        WHERE c.chat_id=? ORDER BY p.points DESC LIMIT 10
+    SELECT p.name, p.points FROM players p
+    JOIN chat_info c ON p.user_id = c.user_id
+    WHERE c.chat_id=?
+    ORDER BY p.points DESC
+    LIMIT 10
     """, (chat_id,))
     leaders = cursor.fetchall()
     text = "🏆 ТОП игроков чата:\n"
@@ -275,7 +410,6 @@ def top_chat(message):
         text += f"{i}. {name} — {points} €!\n"
     bot.reply_to(message, text)
     log_user_info(message)
-
 
 @bot.message_handler(commands=["topworld"])
 def top_world(message):
@@ -287,187 +421,96 @@ def top_world(message):
     bot.reply_to(message, text)
     log_user_info(message)
 
-@bot.message_handler(commands=['start'])
-def send_menu(message):
-    if message.chat.type != "private":
-        bot.send_message(message.chat.id, "Эта команда доступна только в личных сообщениях!")
-        return
-    chat_id = message.chat.id
-    inline_markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_link1 = types.InlineKeyboardButton("➕ Добавь бота в свой канал/чат!", url="https://t.me/ArgusM_bot?startgroup=true")
-    btn_link2 = types.InlineKeyboardButton("Канал Mr.MUFFDIN👾", url="https://t.me/+wDw25hUBPd1mMGVi")
+# === Логирование сущностей всех текстов ===
+# Функция добавления пользователя в таблицу лимитов
+def ensure_search_limit(user_id):
+    cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        cursor.execute("SELECT phone_number FROM user_info WHERE user_id=?", (user_id,))
+        user_row = cursor.fetchone()
+        phone = user_row[0] if user_row else None
 
-    btn1 = types.InlineKeyboardButton("Панель админа👑", callback_data= "adminka")
-    btn2 = types.InlineKeyboardButton("Обратная связь🎭", callback_data= "feedback")
+        if phone:
+            unlimited = 1
+            searches = 0
+        else:
+            unlimited = 0
+            searches = 5  # стартовый лимит
 
-    inline_markup.add(btn_link1, btn_link2)
-    inline_markup.add(btn1, btn2)
+        cursor.execute(
+            "INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, ?, ?)",
+            (user_id, searches, unlimited)
+        )
+        conn.commit()
 
-    photo_path = r"Photo/photo_2025-09-20_17-49-18.jpg"
-    with open(photo_path, "rb") as photo_file:
-        bot.send_photo(chat_id, photo=photo_file, reply_markup=inline_markup)
-
-    log_user_info(message)
-
-@bot.callback_query_handler(func=lambda call: call.data == "adminka")
-def handle_admin(call):
-    chat_id = call.message.chat.id
-    user_id = call.from_user.id
-    bot.answer_callback_query(call.id)
-
-    cursor.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,))
-    if cursor.fetchone():
-        show_admin_menu(chat_id)  # уже админ → сразу меню
-    else:
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        btn_contact = types.KeyboardButton("📞 Отправить номер телефона", request_contact=True)
-        markup.add(btn_contact)
-        bot.send_message(chat_id, "Чтобы войти в админку, поделитесь своим номером:", reply_markup=markup)
-
-@bot.message_handler(content_types=['contact'])
-def handle_contact(message):
-    if not message.contact:
-        bot.send_message(message.chat.id, "Вы не отправили номер телефона! Попробуйте ещё раз.")
-        return
-
-    log_user_info(message, contact=message.contact)
-
-    # Предлагаем варианты
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    btn1 = types.InlineKeyboardButton("🔑 Ввести пароль", callback_data="get_admin_password")
-    btn2 = types.InlineKeyboardButton("💰 Купить за 1000€ (игровая валюта)", callback_data="get_admin_game")
-    btn3 = types.InlineKeyboardButton("💵 Купить за реальные деньги", url="https://t.me/your_payment_link")  # тут твоя ссылка
-
-    markup.add(btn1, btn2, btn3)
-    bot.send_message(message.chat.id, "Выберите способ получения админки:", reply_markup=markup)
-
-# === Обратная связь ===
-@bot.callback_query_handler(func=lambda call: call.data == "feedback")
-def handle_feedback(call):
-    chat_id = call.message.chat.id
-    bot.answer_callback_query(call.id)
-    bot.send_message(chat_id, "Для связи с разработчиками введи !! перед своим сообщением!")
-
-
-@bot.message_handler(func=lambda message: message.text and message.text.startswith("!!"))
-def feedback_handler(message):
-    feedback_text = message.text[2:].strip()
-
-    bot.send_message(
-        me,
-        f"📩 Сообщение от {message.from_user.first_name} (@{message.from_user.username}):\n\n{feedback_text}"
-    )
-    bot.reply_to(message, "Спасибо! Ваше сообщение отправлено разработчику ✅")
-
-
-def save_entities(message):
-    if not message.text:
-        return
-
-    # Сохраняем сущности из Telegram
-    if message.entities:
-        relevant_types = {'url', 'email', 'phone_number'}
-        for entity in message.entities:
-            if entity.type in relevant_types:
-                start = entity.offset
-                end = start + entity.length
-                value = message.text[start:end]
-                cursor.execute("""
-                               INSERT INTO user_entities (user_id, entity_type, entity_value)
-                               VALUES (?, ?, ?)
-                               """, (message.from_user.id, entity.type, value))
-
-    # И дополнительно ищем ссылки через regex
-    urls = re.findall(r'https?://\S+', message.text)
-    emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', message.text)
-
-    for url in urls:
-        cursor.execute("""
-                       INSERT INTO user_entities (user_id, entity_type, entity_value)
-                       VALUES (?, ?, ?)
-                       """, (message.from_user.id, 'url', url))
-
-    for email in emails:
-        cursor.execute("""
-                       INSERT INTO user_entities (user_id, entity_type, entity_value)
-                       VALUES (?, ?, ?)
-                       """, (message.from_user.id, 'email', email))
-
-    conn.commit()
-
-def log_user_info(message, contact=None):
-    save_user_info(message, contact)
-    save_chat_info(message)
-    save_entities(message)  # теперь сохраняем сущности
-
+# === Поиск пользователя по username (только для админов) ===
 @bot.message_handler(func=lambda message: message.text and message.text.startswith("@"))
 def get_user_info_by_username(message):
     user_id = message.from_user.id
 
-    # проверяем, что отправитель админ
-    cursor.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,))
-    if not cursor.fetchone():
+    # Получаем лимит поиска пользователя
+    cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        # Если пользователя нет в таблице — создаём с 0 поисков и unlimited=0
+        cursor.execute("INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, 0, 0)", (user_id,))
+        conn.commit()
+        searches, unlimited = 0, 0
+    else:
+        searches, unlimited = row
+
+    if not unlimited and searches <= 0:
+        bot.reply_to(message, "⚠ У вас закончились поисковые запросы!")
         return
 
-    username = message.text[1:]  # убираем @
-
-    # получаем информацию о пользователе
+    username = message.text[1:]
     cursor.execute("SELECT * FROM user_info WHERE username=?", (username,))
     user = cursor.fetchone()
     if not user:
         bot.reply_to(message, f"Пользователь @{username} не найден.")
         return
 
-    uid = user[0]
-    uname = user[1]
-    fname = user[2]
-    lname = user[3]
-    is_bot = "Да" if user[4] else "Нет"
-    phone = user[5] or "Не указан"
-    lang = user[6] or "Не указан"
+    uid, uname, fname, lname, is_bot, phone, lang = user
+    is_bot_text = "Да" if is_bot else "Нет"
+    phone = phone or "Не указан"
+    lang = lang or "Не указан"
 
-    # история username
+    # История username
     cursor.execute(
         "SELECT old_username, new_username, changed_at FROM username_history WHERE user_id=? ORDER BY changed_at DESC",
         (uid,))
     history = cursor.fetchall()
     history_text = "\n".join([f"{old} → {new} ({changed})" for old, new, changed in history]) or "Нет изменений"
 
-    # количество чатов
+    # Количество чатов
     cursor.execute("SELECT COUNT(*) FROM chat_info WHERE user_id=?", (uid,))
     chats_count = cursor.fetchone()[0]
 
-    # сущности пользователя
+    # Сущности пользователя
     cursor.execute("SELECT entity_type, entity_value, created_at FROM user_entities WHERE user_id=?", (uid,))
     entities = cursor.fetchall()
-    entities_text = "\n".join([f"{etype}: {value} ({created})" for etype, value, created in entities]) or "Нет сущностей"
+    entities_text = "\n".join(
+        [f"{etype}: {value} ({created})" for etype, value, created in entities]) or "Нет сущностей"
 
     bot.reply_to(message, f"""
 Информация о пользователе @{username}:
 ID: {uid}
 Имя: {fname}
 Фамилия: {lname}
-Бот: {is_bot}
+Бот: {is_bot_text}
 Телефон: {phone}
 Язык: {lang}
 Количество чатов: {chats_count}
-История username:
-{history_text}
-Сущности пользователя:
-{entities_text}
-    """)
+История username: {history_text}
+Сущности пользователя: {entities_text}
+""")
 
+    # Уменьшаем количество доступных поисков, если не unlimited
+    if not unlimited:
+        cursor.execute("UPDATE search_limits SET searches = searches - 1 WHERE user_id=?", (user_id,))
+        conn.commit()
 
-# === Логирование всех текстов (кроме служебных) ===
-@bot.message_handler(func=lambda message: True, content_types=['text'])
-def handle_entities(message):
-    if message.text.startswith(('/', '!!', '@')):
-        return
-    log_user_info(message)
-
-
-# Запуск бота
+# === Запуск бота ===
 bot.infinity_polling()
-
-
-
