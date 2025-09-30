@@ -10,7 +10,6 @@ import json
 import random
 import re
 import time
-import time
 import requests
 
 # === Настройки бота ===
@@ -194,6 +193,15 @@ def save_user_info(message, contact=None):
         user.language_code
     ))
     conn.commit()
+
+def get_whatsapp_link(phone):
+
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    # wa.me требует только цифры без '+', скобок и пробелов
+    phone_digits = re.sub(r'\D', '', phone)
+    return f"https://wa.me/{phone_digits}"
+
 
 def save_chat_info(message):
     chat = message.chat
@@ -382,7 +390,6 @@ def handle_callback(call):
         btn3 = types.InlineKeyboardButton("10 $ = 40 Запросов", callback_data="tariff_money3")
         btn4 = types.InlineKeyboardButton("20 $ = 100 Запросов", callback_data="tariff_money4")
         btn5 = types.InlineKeyboardButton("50 $ = 300 Запросов", callback_data="tariff_money5")
-        btn6 = types.InlineKeyboardButton("100 $ = 700 Запросов", callback_data="tariff_money6")
         btn6 = types.InlineKeyboardButton("100 $ = 700 Запросов", callback_data="tariff_money6")
 
         markup.add(btn1, btn2, btn3, btn4, btn5, btn6)
@@ -729,7 +736,11 @@ def get_user_info(message):
     user_id = message.from_user.id
     query = message.text.strip()
 
+    # Используем row_factory для удобного доступа к колонкам
+    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
+
+    # Проверка лимитов поиска
     cur.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
     row = cur.fetchone()
     if not row:
@@ -737,7 +748,7 @@ def get_user_info(message):
         conn.commit()
         searches, unlimited = 0, 0
     else:
-        searches, unlimited = row
+        searches, unlimited = row["searches"], row["unlimited"]
     if not unlimited and searches <= 0:
         bot.reply_to(message, "⚠ У вас закончились поисковые запросы!")
         return
@@ -745,7 +756,7 @@ def get_user_info(message):
     # Определяем тип запроса
     if query.startswith("@"):
         field, value = "username", query[1:]
-    elif query.isdigit() and len(query) <= 10:  # допустим, user_id до 10 цифр
+    elif query.isdigit() and len(query) <= 10:
         field, value = "user_id", int(query)
     elif re.fullmatch(r"\+?\d{7,15}", query):
         field, value = "phone_number", normalize_phone(query)
@@ -760,48 +771,50 @@ def get_user_info(message):
         cur.execute(f"SELECT * FROM user_info WHERE {field}=?", (value,))
     user = cur.fetchone()
 
-    # Если пользователь найден, берем все данные
+    # Инициализация данных
     uid = uname = fname = lname = is_bot = phone = lang = "—"
     if user:
-        uid, uname, fname, lname, is_bot, phone, lang = user
-        uid = uid or "—"
-        uname = uname or "—"
-        fname = fname or "—"
-        lname = lname or "—"
-        lang = lang or "—"
-        phone = normalize_phone(phone) if phone else "—"
+        uid = user["user_id"]
+        uname = user["username"] or "—"
+        fname = user["first_name"] or "—"
+        lname = user["last_name"] or "—"
+        is_bot = user["is_bot"]
+        phone = normalize_phone(user["phone_number"]) if user["phone_number"] else "—"
+        lang = user["language_code"] or "—"
     else:
-        if field != "phone_number":
+        if field == "phone_number":
+            phone = value
+        else:
             bot.reply_to(message, f"❌ Пользователь с {field}={value} не найден.")
             return
 
     # История username
-    cur.execute(
-        "SELECT old_username, new_username, changed_at FROM username_history WHERE user_id=? ORDER BY changed_at DESC",
-        (uid,) if uid != "—" else (0,)
-    )
-    history = cur.fetchall()
-    history_text = "\n".join([f"{old} → {new} ({changed})" for old, new, changed in history]) or "—"
+    history_text = "—"
+    if uid != "—":
+        cur.execute(
+            "SELECT old_username, new_username, changed_at FROM username_history WHERE user_id=? ORDER BY changed_at DESC",
+            (uid,)
+        )
+        history = cur.fetchall()
+        history_text = "\n".join([f"{h['old_username']} → {h['new_username']} ({h['changed_at']})" for h in history]) or "—"
 
     # Количество чатов
+    chats_count = "—"
     if uid != "—":
-        cur.execute("SELECT COUNT(*) FROM chat_info WHERE user_id=?", (uid,))
-        chats_count = cur.fetchone()[0]
-    else:
-        chats_count = "—"
+        cur.execute("SELECT COUNT(*) as cnt FROM chat_info WHERE user_id=?", (uid,))
+        chats_count = cur.fetchone()["cnt"]
 
     # Сущности пользователя
+    entities_text = "—"
     if uid != "—":
         cur.execute("SELECT entity_type, entity_value, created_at FROM user_entities WHERE user_id=?", (uid,))
         entities = cur.fetchall()
-        entities_text = "\n".join([f"{etype}: {value} ({created})" for etype, value, created in entities]) or "—"
-    else:
-        entities_text = "—"
+        entities_text = "\n".join([f"{e['entity_type']}: {e['entity_value']} ({e['created_at']})" for e in entities]) or "—"
 
-    # Анализ телефона
+    # Анализ телефона через phonenumbers
     if phone != "—":
-        analysis = analyze_phone_full(str(phone))
-        phone_formatted = analysis.get("e164") or "—"
+        analysis = analyze_phone_full(phone)
+        phone_formatted = analysis.get("e164") or phone
         region_code = analysis.get("region_code") or "—"
         country_code = analysis.get("country_code") or "—"
         region_desc = analysis.get("region_description") or "—"
@@ -811,34 +824,40 @@ def get_user_info(message):
     else:
         phone_formatted = region_code = country_code = region_desc = carrier_name = tzs_str = utc_str = "—"
 
-    # Формируем красивый ответ
-    # Формируем красивый ответ с эмодзи и HTML-разметкой
+    # Формируем сообщение
     reply = f"""
-    <b>ℹ Информация о пользователе</b>
-    <b>ID:</b> <code>{uid}</code>
-    <b>Username:</b> @{uname}
-    <b>Имя:</b> {fname}
-    <b>Фамилия:</b> {lname}
-    <b>Язык:</b> {lang}
-    <b>Количество груп от:</b> {chats_count}
+<b>ℹ Информация о пользователе</b>
+<b>ID:</b> <code>{uid}</code>
+<b>Username:</b> @{uname}
+<b>Имя:</b> {fname}
+<b>Фамилия:</b> {lname}
+<b>Язык:</b> {lang}
+<b>Количество групп от:</b> {chats_count}
 
-    <b>📞 Телефон</b>
-    <b>Номер:</b> <code>{phone_formatted}</code>
-    <b>Страна / регион:</b> {region_code} 
-    <b>Код страны:</b> +{country_code}
-    <b>Регион:</b> {region_desc}
-    <b>Оператор:</b> {carrier_name}
-    <b>Таймзона:</b> {tzs_str}
-    <b>UTC смещения:</b> {utc_str}
-    
-    <b>📜 История username:</b>
-    <pre>{history_text}\n</pre>
-    <b>🗂 Сущности пользователя:</b>
-    <pre>{entities_text}</pre>
-    
-    """.strip()
+<b>📞 Телефон</b>
+<b>Номер:</b> <code>{phone_formatted}</code>
+<b>Страна / регион:</b> {region_code} 
+<b>Код страны:</b> +{country_code}
+<b>Регион:</b> {region_desc}
+<b>Оператор:</b> {carrier_name}
+<b>Таймзона:</b> {tzs_str}
+<b>UTC смещения:</b> {utc_str}
 
-    bot.reply_to(message, reply)
+<b>📜 История username:</b>
+<pre>{history_text}\n</pre>
+<b>🗂 Сущности пользователя:</b>
+<pre>{entities_text}</pre>
+""".strip()
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+
+    # Кнопка WhatsApp для любого корректного номера
+    if phone and phone != "—":
+        wa_link = get_whatsapp_link(phone)
+        btn_whatsapp = types.InlineKeyboardButton("📱 Открыть WhatsApp", url=wa_link)
+        markup.add(btn_whatsapp)
+
+    bot.send_message(chat_id, reply, reply_markup=markup)
 
     # Минус один поиск если не unlimited
     if not unlimited:
