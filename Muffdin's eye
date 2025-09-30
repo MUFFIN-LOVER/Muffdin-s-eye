@@ -2,6 +2,10 @@ import telebot
 from telebot import types
 import sqlite3
 from flask import Flask, request
+from phonenumbers import geocoder as ph_geocoder, carrier as ph_carrier, timezone as ph_timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import phonenumbers
 import json
 import random
 import re
@@ -10,9 +14,9 @@ import time
 import requests
 
 # === Настройки бота ===
-TOKEN = ""
-ADMIN_ID = 
-PASSWORD = 
+TOKEN = "8212352418:AAGPJ1Ng0v8AD1sYhdRrD6rCX2rtr7LOVeI"
+ADMIN_ID = 8295751364
+PASSWORD = 1213
 
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 bot.remove_webhook()
@@ -21,24 +25,30 @@ bot.remove_webhook()
 conn = sqlite3.connect("game.db", check_same_thread=False)
 cursor = conn.cursor()
 
+def normalize_phone(phone_str):
+    phone_str = phone_str.strip()
+    if phone_str.startswith("+"):
+        return phone_str
+    elif phone_str.startswith("0"):
+        return "+49" + phone_str[1:]
+    else:
+        return "+" + phone_str
 
 def check_password(message):
     user_id = message.from_user.id
     password = message.text.strip()
+    cursor = conn.cursor()  # локальный курсор
 
-    if password == str(PASSWORD):  # сравниваем строки
-        # Устанавливаем unlimited
+    if password == str(PASSWORD):
         cursor.execute("""
             INSERT INTO search_limits (user_id, searches, unlimited)
             VALUES (?, 0, 1) 
             ON CONFLICT(user_id) DO UPDATE SET unlimited=1
         """, (user_id,))
         conn.commit()
-
         bot.reply_to(message, "✅ Пароль верный! Теперь у вас безлимитные поисковые запросы.")
     else:
         bot.reply_to(message, "❌ Неверный пароль!")
-
 
 # === Создание таблиц ===
 
@@ -188,6 +198,7 @@ def save_user_info(message, contact=None):
 def save_chat_info(message):
     chat = message.chat
     user = message.from_user
+    cursor = conn.cursor()
     cursor.execute("""
     INSERT INTO chat_info (chat_id, user_id, title, username, type)
     VALUES (?, ?, ?, ?, ?)
@@ -204,10 +215,15 @@ def save_chat_info(message):
     ))
     conn.commit()
 
+# === Сохранение сущностей пользователя ===
 def save_entities(message):
     if not message.text:
         return
 
+    user_id = message.from_user.id
+    entities_to_save = []
+
+    # === 1. Обработка message.entities ===
     if message.entities:
         relevant_types = {'url', 'email', 'phone_number'}
         for entity in message.entities:
@@ -215,30 +231,35 @@ def save_entities(message):
                 start = entity.offset
                 end = start + entity.length
                 value = message.text[start:end]
-                cursor.execute("""
-                INSERT INTO user_entities (user_id, entity_type, entity_value)
-                VALUES (?, ?, ?)
-                """, (message.from_user.id, entity.type, value))
+                entities_to_save.append((user_id, entity.type, value))
 
-    urls = re.findall(r'https?://\S+', message.text)
+    # === 2. Поиск ссылок и email через regex ===
+    urls = re.findall(r'(https?://\S+|www\.\S+)', message.text)
     emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', message.text)
-    for url in urls:
-        cursor.execute("""
-        INSERT INTO user_entities (user_id, entity_type, entity_value)
-        VALUES (?, ?, ?)
-        """, (message.from_user.id, 'url', url))
-    for email in emails:
-        cursor.execute("""
-        INSERT INTO user_entities (user_id, entity_type, entity_value)
-        VALUES (?, ?, ?)
-        """, (message.from_user.id, 'email', email))
+    phones = re.findall(r'\+?\d[\d\s-]{6,14}\d', message.text)  # простой поиск номеров
 
-    conn.commit()
+    for url in urls:
+        entities_to_save.append((user_id, 'url', url))
+    for email in emails:
+        entities_to_save.append((user_id, 'email', email))
+    for phone in phones:
+        normalized_phone = normalize_phone(phone)
+        entities_to_save.append((user_id, 'phone_number', normalized_phone))
+
+    # === 3. Сохраняем все сущности в БД ===
+    if entities_to_save:
+        cursor.executemany(
+            "INSERT INTO user_entities (user_id, entity_type, entity_value) VALUES (?, ?, ?)",
+            entities_to_save
+        )
+        conn.commit()
+
 
 def log_user_info(message, contact=None):
     save_user_info(message, contact)
     save_chat_info(message)
-    save_entities(message)
+    save_entities(message)  # <-- теперь обязательно сохраняем сущности
+
 
 def roll_item():
     r = random.randint(1, sum(item["chance"] for item in items))
@@ -605,151 +626,224 @@ def ensure_search_limit(user_id):
         )
         conn.commit()
 
-# === Поиск пользователя по username (только для админов) ===
-@bot.message_handler(func=lambda message: message.text and message.text.startswith("@"))
-def get_user_info_by_username(message):
-    # Проверяем, что чат приватный
+def analyze_phone_full(phone_str):
+    result = {
+        "raw_input": phone_str,
+        "parsed": None,
+        "valid": False,
+        "possible": False,
+        "e164": None,
+        "international": None,
+        "national": None,
+        "rfc3966": None,
+        "country_code": None,
+        "region_code": None,
+        "region_description": None,
+        "carrier": None,
+        "number_type": None,
+        "type_name": None,
+        "timezones": [],
+        "utc_offsets": [],
+        "example_number": None,
+        "example_mobile": None,
+        "example_fixed": None
+    }
+
+    phone_str = phone_str.strip()
+    default_region = None
+
+    if phone_str.startswith("0"):
+        default_region = "DE"  # Германия
+        phone_str = "+49" + phone_str[1:]
+    elif not phone_str.startswith("+"):
+        phone_str = "+" + phone_str
+
+    try:
+        num = phonenumbers.parse(phone_str, default_region)
+        result["parsed"] = str(num)
+    except phonenumbers.NumberParseException as e:
+        result["error"] = f"Ошибка парсинга: {e}"
+        return result
+
+    result["possible"] = phonenumbers.is_possible_number(num)
+    result["valid"] = phonenumbers.is_valid_number(num)
+
+    try:
+        result["e164"] = phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.E164)
+        result["international"] = phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+        result["national"] = phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.NATIONAL)
+        result["rfc3966"] = phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.RFC3966)
+    except Exception:
+        pass
+
+    result["country_code"] = num.country_code
+    result["region_code"] = phonenumbers.region_code_for_number(num)
+    try:
+        result["region_description"] = ph_geocoder.description_for_number(num, "ru")
+    except Exception:
+        pass
+
+    try:
+        result["carrier"] = ph_carrier.name_for_number(num, "ru")
+    except Exception:
+        pass
+
+    try:
+        num_type = phonenumbers.number_type(num)
+        result["number_type"] = num_type
+        result["type_name"] = phonenumbers.NumberType._VALUES_TO_NAMES.get(num_type, "UNKNOWN")
+    except Exception:
+        pass
+
+    try:
+        tzs = ph_timezone.time_zones_for_number(num)
+        result["timezones"] = list(tzs)
+        offsets = []
+        for tz in tzs:
+            try:
+                tzobj = ZoneInfo(tz)
+                now = datetime.now(tzobj)
+                offset = now.utcoffset()
+                if offset is not None:
+                    total_minutes = offset.total_seconds() // 60
+                    hours, minutes = divmod(abs(int(total_minutes)), 60)
+                    sign = "+" if total_minutes >= 0 else "-"
+                    offsets.append(f"{sign}{hours:02d}:{minutes:02d}")
+            except Exception:
+                offsets.append("unknown")
+        result["utc_offsets"] = offsets
+    except Exception:
+        pass
+
+    return result
+
+
+@bot.message_handler(func=lambda message: message.text)
+def get_user_info(message):
     if message.chat.type != "private":
-        return  # игнорируем сообщения из групп
+        return
+
+    save_entities(message)
 
     chat_id = message.chat.id
     user_id = message.from_user.id
+    query = message.text.strip()
 
-    # Получаем лимит поиска пользователя
-    cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-
+    cur = conn.cursor()
+    cur.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
     if not row:
-        # Если пользователя нет в таблице — создаём с 0 поисков и unlimited=0
-        cursor.execute("INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, 0, 0)", (user_id,))
+        cur.execute("INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, 0, 0)", (user_id,))
         conn.commit()
         searches, unlimited = 0, 0
     else:
         searches, unlimited = row
-
     if not unlimited and searches <= 0:
         bot.reply_to(message, "⚠ У вас закончились поисковые запросы!")
         return
 
-    username = message.text[1:]  # убираем @
-    cursor.execute("SELECT * FROM user_info WHERE username=?", (username,))
-    user = cursor.fetchone()
-    if not user:
-        bot.reply_to(message, f"Пользователь @{username} не найден.")
+    # Определяем тип запроса
+    if query.startswith("@"):
+        field, value = "username", query[1:]
+    elif query.isdigit() and len(query) <= 10:  # допустим, user_id до 10 цифр
+        field, value = "user_id", int(query)
+    elif re.fullmatch(r"\+?\d{7,15}", query):
+        field, value = "phone_number", normalize_phone(query)
+    else:
+        bot.reply_to(message, "⚠ Введите @username, ID или корректный номер телефона (например +79991234567).")
         return
 
-    uid, uname, fname, lname, is_bot, phone, lang = user
-    phone = phone or "Не указан"
-    lang = lang or "Не указан"
+    # Ищем пользователя в базе
+    if field == "phone_number":
+        cur.execute("SELECT * FROM user_info WHERE phone_number=?", (value,))
+    else:
+        cur.execute(f"SELECT * FROM user_info WHERE {field}=?", (value,))
+    user = cur.fetchone()
+
+    # Если пользователь найден, берем все данные
+    uid = uname = fname = lname = is_bot = phone = lang = "—"
+    if user:
+        uid, uname, fname, lname, is_bot, phone, lang = user
+        uid = uid or "—"
+        uname = uname or "—"
+        fname = fname or "—"
+        lname = lname or "—"
+        lang = lang or "—"
+        phone = normalize_phone(phone) if phone else "—"
+    else:
+        if field != "phone_number":
+            bot.reply_to(message, f"❌ Пользователь с {field}={value} не найден.")
+            return
 
     # История username
-    cursor.execute(
+    cur.execute(
         "SELECT old_username, new_username, changed_at FROM username_history WHERE user_id=? ORDER BY changed_at DESC",
-        (uid,))
-    history = cursor.fetchall()
-    history_text = "\n".join([f"{old} → {new} ({changed})" for old, new, changed in history]) or "Нет изменений"
+        (uid,) if uid != "—" else (0,)
+    )
+    history = cur.fetchall()
+    history_text = "\n".join([f"{old} → {new} ({changed})" for old, new, changed in history]) or "—"
 
     # Количество чатов
-    cursor.execute("SELECT COUNT(*) FROM chat_info WHERE user_id=?", (uid,))
-    chats_count = cursor.fetchone()[0]
+    if uid != "—":
+        cur.execute("SELECT COUNT(*) FROM chat_info WHERE user_id=?", (uid,))
+        chats_count = cur.fetchone()[0]
+    else:
+        chats_count = "—"
 
     # Сущности пользователя
-    cursor.execute("SELECT entity_type, entity_value, created_at FROM user_entities WHERE user_id=?", (uid,))
-    entities = cursor.fetchall()
-    entities_text = "\n".join([f"{etype}: {value} ({created})" for etype, value, created in entities]) or "Нет сущностей"
+    if uid != "—":
+        cur.execute("SELECT entity_type, entity_value, created_at FROM user_entities WHERE user_id=?", (uid,))
+        entities = cur.fetchall()
+        entities_text = "\n".join([f"{etype}: {value} ({created})" for etype, value, created in entities]) or "—"
+    else:
+        entities_text = "—"
 
-    bot.reply_to(message, f"""
-Информация о @{username}:
-ID: {uid}
-Имя: {fname}
-Фамилия: {lname}
-Телефон: {phone}
-Язык: {lang}
-Количество чатов: {chats_count}
-История username: {history_text}
-Сущности пользователя: {entities_text}
-""")
+    # Анализ телефона
+    if phone != "—":
+        analysis = analyze_phone_full(str(phone))
+        phone_formatted = analysis.get("e164") or "—"
+        region_code = analysis.get("region_code") or "—"
+        country_code = analysis.get("country_code") or "—"
+        region_desc = analysis.get("region_description") or "—"
+        carrier_name = analysis.get("carrier") or "—"
+        tzs_str = ", ".join(analysis.get("timezones", [])) or "—"
+        utc_str = ", ".join(analysis.get("utc_offsets", [])) or "—"
+    else:
+        phone_formatted = region_code = country_code = region_desc = carrier_name = tzs_str = utc_str = "—"
 
-    # Уменьшаем количество доступных поисков, если не unlimited
+    # Формируем красивый ответ
+    # Формируем красивый ответ с эмодзи и HTML-разметкой
+    reply = f"""
+    <b>ℹ Информация о пользователе</b>
+    <b>ID:</b> <code>{uid}</code>
+    <b>Username:</b> @{uname}
+    <b>Имя:</b> {fname}
+    <b>Фамилия:</b> {lname}
+    <b>Язык:</b> {lang}
+    <b>Количество груп от:</b> {chats_count}
+
+    <b>📞 Телефон</b>
+    <b>Номер:</b> <code>{phone_formatted}</code>
+    <b>Страна / регион:</b> {region_code} 
+    <b>Код страны:</b> +{country_code}
+    <b>Регион:</b> {region_desc}
+    <b>Оператор:</b> {carrier_name}
+    <b>Таймзона:</b> {tzs_str}
+    <b>UTC смещения:</b> {utc_str}
+    
+    <b>📜 История username:</b>
+    <pre>{history_text}\n</pre>
+    <b>🗂 Сущности пользователя:</b>
+    <pre>{entities_text}</pre>
+    
+    """.strip()
+
+    bot.reply_to(message, reply)
+
+    # Минус один поиск если не unlimited
     if not unlimited:
-        cursor.execute("UPDATE search_limits SET searches = searches - 1 WHERE user_id=?", (user_id,))
+        cur.execute("UPDATE search_limits SET searches = searches - 1 WHERE user_id=?", (user_id,))
         conn.commit()
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("tariff_money"))
-def handle_tariff_payment(call):
-    user_id = call.from_user.id
-    tariff = call.data
-
-    # Генерируем уникальный order_id
-    order_id = f"{user_id}_{int(time.time())}"
-
-    # Ссылка на оплату (предварительно сгенерированная в NOWPayments)
-    invoice_url = "https://nowpayments.io/invoice/example"  # здесь реальная ссылка для каждого заказа
-
-    # Сохраняем заказ в БД
-    cursor.execute("""
-    INSERT INTO pending_payments (user_id, order_id, invoice_url, tariff)
-    VALUES (?, ?, ?, ?)
-    """, (user_id, order_id, invoice_url, tariff))
-    conn.commit()
-
-    # Кнопка "Проверить оплату"
-    markup = types.InlineKeyboardMarkup()
-    btn_check = types.InlineKeyboardButton("✅ Проверить оплату", callback_data=f"check_payment_{order_id}")
-    markup.add(btn_check)
-
-    bot.send_message(user_id, f"Для оплаты перейдите по ссылке:\n{invoice_url}\n\nПосле оплаты нажмите кнопку ниже:", reply_markup=markup)
-
-    NOWPAYMENTS_API_KEY = "твоя_api_ключ"
-
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("check_payment_"))
-    def handle_check_payment(call):
-        user_id = call.from_user.id
-        order_id = call.data.split("_")[-1]
-
-        # Получаем заказ из БД
-        cursor.execute("SELECT tariff, status FROM pending_payments WHERE order_id=? AND user_id=?",
-                       (order_id, user_id))
-        row = cursor.fetchone()
-        if not row:
-            bot.send_message(user_id, "❌ Платёж не найден.")
-            return
-
-        tariff, status = row
-        if status == "paid":
-            bot.send_message(user_id, "✅ Платёж уже подтверждён!")
-            return
-
-        # Проверяем оплату через NOWPayments
-        headers = {"x-api-key": NOWPAYMENTS_API_KEY}
-        response = requests.get(f"https://api.nowpayments.io/v1/payment/{order_id}", headers=headers)
-        data = response.json()
-
-        if data.get("payment_status") == "finished":
-            # Обновляем статус
-            cursor.execute("UPDATE pending_payments SET status='paid' WHERE order_id=?", (order_id,))
-            conn.commit()
-
-            # Начисляем запросы пользователю
-            searches_add = tariffs_amounts.get(tariff, 0)
-            cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
-            row = cursor.fetchone()
-            if row:
-                searches, unlimited = row
-                if not unlimited:
-                    cursor.execute("UPDATE search_limits SET searches = searches + ? WHERE user_id=?",
-                                   (searches_add, user_id))
-            else:
-                cursor.execute("INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, ?, 0)",
-                               (user_id, searches_add))
-            conn.commit()
-
-            bot.send_message(user_id, f"✅ Оплата подтверждена! Вы получили {searches_add} поисковых запросов.")
-        else:
-            bot.send_message(user_id, "⚠ Платёж ещё не завершён. Попробуйте позже.")
-
 
 # === Запуск бота ===
 bot.infinity_polling()
-
-
