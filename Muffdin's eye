@@ -1,10 +1,12 @@
 import telebot
+import threading
 from telebot import types
 import sqlite3
 from flask import Flask, request
 from phonenumbers import geocoder as ph_geocoder, carrier as ph_carrier, timezone as ph_timezone
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from telebot import apihelper
 import phonenumbers
 import json
 import random
@@ -25,30 +27,31 @@ bot.remove_webhook()
 conn = sqlite3.connect("game.db", check_same_thread=False)
 cursor = conn.cursor()
 
-def normalize_phone(phone_str):
-    phone_str = phone_str.strip()
-    if phone_str.startswith("+"):
-        return phone_str
-    elif phone_str.startswith("0"):
-        return "+49" + phone_str[1:]
-    else:
-        return "+" + phone_str
+def normalize_phone(phone_str, default_region="DE"):
+    try:
+        num = phonenumbers.parse(phone_str, default_region)
+        if phonenumbers.is_possible_number(num) and phonenumbers.is_valid_number(num):
+            return phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.E164)
+        else:
+            return None
+    except phonenumbers.NumberParseException:
+        return None
 
 def check_password(message):
     user_id = message.from_user.id
     password = message.text.strip()
-    cursor = conn.cursor()  # локальный курсор
 
     if password == str(PASSWORD):
-        cursor.execute("""
-            INSERT INTO search_limits (user_id, searches, unlimited)
-            VALUES (?, 0, 1) 
-            ON CONFLICT(user_id) DO UPDATE SET unlimited=1
-        """, (user_id,))
-        conn.commit()
-        bot.reply_to(message, "✅ Пароль верный! Теперь у вас безлимитные поисковые запросы.")
+        with conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO search_limits (user_id, searches, unlimited)
+                VALUES (?, 0, 1) 
+                ON CONFLICT(user_id) DO UPDATE SET unlimited=1
+            """, (user_id,))
+        bot.reply_to(message, "Пароль верный! Теперь у вас безлимитные поисковые запросы.")
     else:
-        bot.reply_to(message, "❌ Неверный пароль!")
+        bot.reply_to(message, "Неверный пароль!")
 
 # === Создание таблиц ===
 
@@ -158,43 +161,35 @@ tariffs_amounts = {
 # === Функции работы с БД ===
 def save_user_info(message, contact=None):
     user = message.from_user
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT phone_number, username FROM user_info WHERE user_id=?", (user.id,))
+        row = cursor.fetchone()
+        old_phone = row[0] if row else None
+        old_username = row[1] if row else None
 
-    # Проверяем, есть ли уже запись
-    cursor.execute("SELECT phone_number, username FROM user_info WHERE user_id=?", (user.id,))
-    row = cursor.fetchone()
-    old_phone = row[0] if row else None
-    old_username = row[1] if row else None
+        if old_username and old_username != user.username:
+            cursor.execute("""
+                INSERT INTO username_history (user_id, old_username, new_username)
+                VALUES (?, ?, ?)
+            """, (user.id, old_username, user.username))
 
-    # Логируем историю username
-    if old_username and old_username != user.username:
+        new_phone = contact.phone_number if contact else old_phone
+
         cursor.execute("""
-        INSERT INTO username_history (user_id, old_username, new_username)
-        VALUES (?, ?, ?)
-        """, (user.id, old_username, user.username))
-
-    # Если прилетел новый контакт – сохраняем, иначе оставляем старый номер
-    new_phone = contact.phone_number if contact else old_phone
-
-    cursor.execute("""
-    INSERT INTO user_info (user_id, username, first_name, last_name, is_bot, phone_number, language_code)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(user_id) DO UPDATE SET
-        username=excluded.username,
-        first_name=excluded.first_name,
-        last_name=excluded.last_name,
-        is_bot=excluded.is_bot,
-        phone_number=excluded.phone_number,
-        language_code=excluded.language_code
-    """, (
-        user.id,
-        user.username,
-        user.first_name,
-        user.last_name,
-        int(user.is_bot),
-        new_phone,
-        user.language_code
-    ))
-    conn.commit()
+            INSERT INTO user_info (user_id, username, first_name, last_name, is_bot, phone_number, language_code)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username=excluded.username,
+                first_name=excluded.first_name,
+                last_name=excluded.last_name,
+                is_bot=excluded.is_bot,
+                phone_number=excluded.phone_number,
+                language_code=excluded.language_code
+        """, (
+            user.id, user.username, user.first_name, user.last_name,
+            int(user.is_bot), new_phone, user.language_code
+        ))
 
 def get_whatsapp_link(phone):
 
@@ -204,26 +199,39 @@ def get_whatsapp_link(phone):
     phone_digits = re.sub(r'\D', '', phone)
     return f"https://wa.me/{phone_digits}"
 
+# ⚡ Эффект "процент загрузки"
+def progress(chat_id, bot, title="Крутим рулетку..."):
+    msg = bot.send_message(chat_id, f"{title} 0%")
+    perc = 0
+    while perc < 100:
+        perc = min(100, perc + random.randint(5, 15))
+        try:
+            bot.edit_message_text(f"{title} {perc}%", chat_id, msg.message_id)
+        except apihelper.ApiTelegramException:
+            pass
+        time.sleep(0.2)
+    return msg  # вернём объект сообщения, чтобы потом переписать финальный результат
 
 def save_chat_info(message):
     chat = message.chat
     user = message.from_user
-    cursor = conn.cursor()
-    cursor.execute("""
-    INSERT INTO chat_info (chat_id, user_id, title, username, type)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(chat_id, user_id) DO UPDATE SET
-        title=excluded.title,
-        username=excluded.username,
-        type=excluded.type
-    """, (
-        chat.id,
-        user.id,
-        getattr(chat, "title", None),
-        getattr(chat, "username", None),
-        chat.type
-    ))
-    conn.commit()
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO chat_info (chat_id, user_id, title, username, type)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                title=excluded.title,
+                username=excluded.username,
+                type=excluded.type
+        """, (
+            chat.id,
+            user.id,
+            getattr(chat, "title", None),
+            getattr(chat, "username", None),
+            chat.type
+        ))
+
 
 # === Сохранение сущностей пользователя ===
 def save_entities(message):
@@ -233,7 +241,6 @@ def save_entities(message):
     user_id = message.from_user.id
     entities_to_save = []
 
-    # === 1. Обработка message.entities ===
     if message.entities:
         relevant_types = {'url', 'email', 'phone_number'}
         for entity in message.entities:
@@ -243,10 +250,9 @@ def save_entities(message):
                 value = message.text[start:end]
                 entities_to_save.append((user_id, entity.type, value))
 
-    # === 2. Поиск ссылок и email через regex ===
     urls = re.findall(r'(https?://\S+|www\.\S+)', message.text)
     emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', message.text)
-    phones = re.findall(r'\+?\d[\d\s-]{6,14}\d', message.text)  # простой поиск номеров
+    phones = re.findall(r'\+?\d[\d\s-]{6,14}\d', message.text)
 
     for url in urls:
         entities_to_save.append((user_id, 'url', url))
@@ -256,14 +262,13 @@ def save_entities(message):
         normalized_phone = normalize_phone(phone)
         entities_to_save.append((user_id, 'phone_number', normalized_phone))
 
-    # === 3. Сохраняем все сущности в БД ===
     if entities_to_save:
-        cursor.executemany(
-            "INSERT INTO user_entities (user_id, entity_type, entity_value) VALUES (?, ?, ?)",
-            entities_to_save
-        )
-        conn.commit()
-
+        with conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                "INSERT INTO user_entities (user_id, entity_type, entity_value) VALUES (?, ?, ?)",
+                entities_to_save
+            )
 
 def log_user_info(message, contact=None):
     save_user_info(message, contact)
@@ -271,57 +276,58 @@ def log_user_info(message, contact=None):
     save_entities(message)  # <-- теперь обязательно сохраняем сущности
 
 
-def roll_item(user_id):
-    # Получаем информацию о пользователе
-    cursor.execute("SELECT got_muffdin FROM players WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    got_muffdin = row[0] if row else 0
+def roll_item(user_id, chat_id, bot, items):
+    msg = bot.send_message(chat_id, "🎲 Депаем... 0%")
+    perc = 0
+    while perc < 100:
+        perc = min(100, perc + random.randint(5, 15))
+        try:
+            bot.edit_message_text(f"🎲 Депаем... {perc}%", chat_id, msg.message_id)
+        except apihelper.ApiTelegramException:
+            pass
+        time.sleep(0.2)
 
-    # Составляем список доступных предметов
-    available_items = []
-    for item in items:
-        # Если пользователь уже получил Mr.Muffdin, исключаем этот предмет
-        if item["emoji"] == "встретил Mr.Muffdin👾" and got_muffdin:
-            continue
-        available_items.append(item)
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT got_muffdin FROM players WHERE user_id=?", (user_id,))
+        row = cursor.fetchone()
+        got_muffdin = row[0] if row else 0
 
-    # Генерация случайного предмета по шансам
-    r = random.randint(1, sum(item["chance"] for item in available_items))
-    cumulative = 0
-    for item in available_items:
-        cumulative += item["chance"]
-        if r <= cumulative:
-            # Динамическая цена для некоторых предметов
-            if item["emoji"] in ["нашёл 💳", "нашёл 📀 с биткоинами"]:
-                item["price"] = random.randint(0, 500) if item["emoji"] == "нашёл 💳" else random.randint(300, 500)
-
-            # Если выпал Mr.Muffdin, отмечаем пользователя
-            if item["emoji"] == "встретил Mr.Muffdin👾":
-                cursor.execute("UPDATE players SET got_muffdin = 1 WHERE user_id=?", (user_id,))
-                conn.commit()
-
-            return item
+        available_items = [item for item in items if not (item["emoji"] == "встретил Mr.Muffdin👾" and got_muffdin)]
+        r = random.randint(1, sum(item["chance"] for item in available_items))
+        cumulative = 0
+        for item in available_items:
+            cumulative += item["chance"]
+            if r <= cumulative:
+                if item["emoji"] in ["нашёл 💳", "нашёл 📀 с биткоинами"]:
+                    item["price"] = random.randint(0, 500) if item["emoji"] == "нашёл 💳" else random.randint(300, 500)
+                if item["emoji"] == "встретил Mr.Muffdin👾":
+                    cursor.execute("UPDATE players SET got_muffdin = 1 WHERE user_id=?", (user_id,))
+                return item
 
 def get_player(user_id, name):
-    cursor.execute("SELECT * FROM players WHERE user_id=?", (user_id,))
-    player = cursor.fetchone()
-    if not player:
-        cursor.execute("INSERT INTO players (user_id, name) VALUES (?, ?)", (user_id, name))
-        conn.commit()
-        return (user_id, name, 0, 0)
-    else:
-        cursor.execute("UPDATE players SET name=? WHERE user_id=?", (name, user_id))
-        conn.commit()
-        return player
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM players WHERE user_id=?", (user_id,))
+        player = cursor.fetchone()
+        if not player:
+            cursor.execute("INSERT INTO players (user_id, name) VALUES (?, ?)", (user_id, name))
+            cursor.execute("SELECT * FROM players WHERE user_id=?", (user_id,))
+            return cursor.fetchone()
+        else:
+            cursor.execute("UPDATE players SET name=? WHERE user_id=?", (name, user_id))
+            return player
+
 
 def update_player(user_id, points=None, last_dep=None):
-    if points is not None and last_dep is not None:
-        cursor.execute("UPDATE players SET points=?, last_dep=? WHERE user_id=?", (points, last_dep, user_id))
-    elif points is not None:
-        cursor.execute("UPDATE players SET points=? WHERE user_id=?", (points, user_id))
-    elif last_dep is not None:
-        cursor.execute("UPDATE players SET last_dep=? WHERE user_id=?", (last_dep, user_id))
-    conn.commit()
+    with conn:
+        cursor = conn.cursor()
+        if points is not None and last_dep is not None:
+            cursor.execute("UPDATE players SET points=?, last_dep=? WHERE user_id=?", (points, last_dep, user_id))
+        elif points is not None:
+            cursor.execute("UPDATE players SET points=? WHERE user_id=?", (points, user_id))
+        elif last_dep is not None:
+            cursor.execute("UPDATE players SET last_dep=? WHERE user_id=?", (last_dep, user_id))
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
@@ -375,15 +381,24 @@ def handle_callback(call):
     user_id = call.from_user.id
     bot.answer_callback_query(call.id)
 
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Получаем очки игрока
+    cursor.execute("SELECT points FROM players WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    points = row["points"] if row else 0
+
+    # === Кнопка "Поиск / Админка" ===
     if call.data == "adminka":
         cursor.execute("SELECT phone_number FROM user_info WHERE user_id=?", (user_id,))
         row = cursor.fetchone()
-        phone_saved = row and row[0]
+        phone_saved = row and row["phone_number"]
+
         if not phone_saved:
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-            btn_contact = types.KeyboardButton("Авторизоваться 📞", request_contact=True)
-            markup.add(btn_contact)
-            bot.send_message(chat_id, "Чтобы продолжить, авторизуйтесь c помощью номера телефона:", reply_markup=markup)
+            markup.add(types.KeyboardButton("Авторизоваться 📞", request_contact=True))
+            bot.send_message(chat_id, "Чтобы продолжить, авторизуйтесь с помощью номера телефона:", reply_markup=markup)
         else:
             markup = types.InlineKeyboardMarkup(row_width=1)
             markup.add(
@@ -394,88 +409,102 @@ def handle_callback(call):
             )
             bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=markup)
 
-    elif call.data == "tariffs":
-        markup = types.InlineKeyboardMarkup(row_width=1)  # 3 кнопки в ряд
-        btn_basic = types.InlineKeyboardButton("$", callback_data="tariff_money")
-        btn_vip = types.InlineKeyboardButton("ᛖ", callback_data="tariff_geme_maney")
-        markup.add(btn_basic, btn_vip)
-        # Можно добавить кнопку "Назад"
-        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
-        markup.add(btn_back)
-        bot.send_message(chat_id, "📊 Выберите тариф:", reply_markup=markup)
-
-    if call.data == "tariff_money":
-        markup = types.InlineKeyboardMarkup(row_width=2)
-
-        # Шесть кнопок (по 2 в ряд)
-        btn1 = types.InlineKeyboardButton("2 $ = 5 Запросов", callback_data="tariff_money1")
-        btn2 = types.InlineKeyboardButton("5 $ = 15 Запросов", callback_data="tariff_money2")
-        btn3 = types.InlineKeyboardButton("10 $ = 40 Запросов", callback_data="tariff_money3")
-        btn4 = types.InlineKeyboardButton("20 $ = 100 Запросов", callback_data="tariff_money4")
-        btn5 = types.InlineKeyboardButton("50 $ = 300 Запросов", callback_data="tariff_money5")
-        btn6 = types.InlineKeyboardButton("100 $ = 700 Запросов", callback_data="tariff_money6")
-
-        markup.add(btn1, btn2, btn3, btn4, btn5, btn6)
-
-        # Большая кнопка (занимает весь ряд)
-        big_btn = types.InlineKeyboardButton("PIN🔐", callback_data="PIN")
-        markup.add(big_btn)
-
-        # Кнопка назад
-        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
-        markup.add(btn_back)
-
-        bot.send_message(chat_id, "📊 Выберите тариф:", reply_markup=markup)
-
-    if call.data == "tariff_geme_maney":
-        markup = types.InlineKeyboardMarkup(row_width=1)
-
-        # Шесть кнопок (по 2 в ряд)
-        btn1 = types.InlineKeyboardButton("1000 ᛖ = 1 Запросов", callback_data="tariff_geme_maney1")
-        btn2 = types.InlineKeyboardButton("5000 ᛖ = 7 Запросов", callback_data="tariff_geme_maney2")
-        btn3 = types.InlineKeyboardButton("10 000 ᛖ = 20 Запросов", callback_data="tariff_geme_maney3")
-
-        markup.add(btn1, btn2, btn3)
-
-        # Большая кнопка (занимает весь ряд)
-        big_btn = types.InlineKeyboardButton("PIN🔐", callback_data="PIN")
-        markup.add(big_btn)
-
-        # Кнопка назад
-        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
-        markup.add(btn_back)
-
-        bot.send_message(chat_id, "📊 Выберите тариф:", reply_markup=markup)
-
+    # === Обратная связь / feedback ===
     elif call.data == "feedback":
         bot.send_message(chat_id, "...")
 
-    elif call.data == "info":
-        # Получаем лимит поиска пользователя
+    # === Главное меню тарифов ===
+    elif call.data == "tariffs":
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("$", callback_data="tariff_money"),
+            types.InlineKeyboardButton("ᛖ", callback_data="tariff_geme_maney"),
+            types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+        )
+        bot.send_message(chat_id, "📊 Выберите категорию тарифов:", reply_markup=markup)
+
+    # === Тарифы $ ===
+    elif call.data == "tariff_money":
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("2 $ = 5 Запросов", callback_data="tariff_money1"),
+            types.InlineKeyboardButton("5 $ = 15 Запросов", callback_data="tariff_money2"),
+            types.InlineKeyboardButton("10 $ = 40 Запросов", callback_data="tariff_money3"),
+            types.InlineKeyboardButton("20 $ = 100 Запросов", callback_data="tariff_money4"),
+            types.InlineKeyboardButton("50 $ = 300 Запросов", callback_data="tariff_money5"),
+            types.InlineKeyboardButton("100 $ = 700 Запросов", callback_data="tariff_money6")
+        )
+        markup.add(types.InlineKeyboardButton("PIN🔐", callback_data="PIN"))
+        markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main"))
+        bot.send_message(chat_id, "📊 Выберите тариф $:", reply_markup=markup)
+
+    # === Тарифы ᛖ ===
+    elif call.data == "tariff_geme_maney":
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("1000 ᛖ = 1 Запрос", callback_data="tariff_geme_maney1"),
+            types.InlineKeyboardButton("5000 ᛖ = 7 Запросов", callback_data="tariff_geme_maney2"),
+            types.InlineKeyboardButton("10000 ᛖ = 20 Запросов", callback_data="tariff_geme_maney3")
+        )
+        markup.add(types.InlineKeyboardButton("PIN🔐", callback_data="PIN"))
+        markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main"))
+        bot.send_message(chat_id, "📊 Выберите тариф ᛖ:", reply_markup=markup)
+
+    # === Покупка тарифа ===
+    elif call.data.startswith("tariff_money") or call.data.startswith("tariff_geme_maney"):
+        tariffs = {
+            "tariff_geme_maney1": (1000, 1),
+            "tariff_geme_maney2": (5000, 7),
+            "tariff_geme_maney3": (10000, 20),
+            "tariff_money1": (2, 5),
+            "tariff_money2": (5, 15),
+            "tariff_money3": (10, 40),
+            "tariff_money4": (20, 100),
+            "tariff_money5": (50, 300),
+            "tariff_money6": (100, 700)
+        }
+
+        cost, searches_add = tariffs[call.data]
+
+        if points < cost:
+            bot.send_message(chat_id, f"Недостаточно очков! Нужно {cost}ᛖ, у вас {points}ᛖ")
+            return
+
+        cursor.execute("UPDATE players SET points = points - ? WHERE user_id=?", (cost, user_id))
+
         cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
         row = cursor.fetchone()
         if row:
-            searches, unlimited = row
-            searches_text = "∞" if unlimited else str(searches)
+            searches, unlimited = row["searches"], row["unlimited"]
+            if not unlimited:
+                cursor.execute("UPDATE search_limits SET searches = searches + ? WHERE user_id=?", (searches_add, user_id))
         else:
-            searches_text = "0"
+            cursor.execute("INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, ?, 0)", (user_id, searches_add))
 
-        bot.send_message(chat_id, f"ℹ Информация о вашем аккаунте:\nОставшиеся поисковые запросы: {searches_text}")
+        conn.commit()
+        bot.send_message(chat_id, f"✅ Успешная покупка! Вы получили {searches_add} поисковых запросов.")
 
+    # === Меню поиска ===
     elif call.data == "search":
-            markup = types.InlineKeyboardMarkup(row_width=1)  # 1 кнопка в ряд
-            btn1 = types.InlineKeyboardButton("Поиск по БД", callback_data="search_name")
-            btn2 = types.InlineKeyboardButton("Поиск по номеру", callback_data="search_phone")
-            btn3 = types.InlineKeyboardButton("Снос", callback_data="search_email")
-            markup.add(btn1, btn2, btn3)
-            # Кнопка
-            btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
-            markup.add(btn_back)
-            bot.send_message(chat_id, "🔍 Выберите способ поиска:", reply_markup=markup)
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("Поиск по БД", callback_data="search_name"),
+            types.InlineKeyboardButton("Снос", callback_data="search_email"),
+            types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+        )
+        bot.send_message(chat_id, "🔍 Выберите способ поиска:", reply_markup=markup)
 
     elif call.data == "search_name":
-        bot.send_message(call.message.chat.id, "Введите ID/USERNAME")
+        bot.send_message(chat_id, "Введите ID/USERNAME/PHONE NUMBER")
 
+    # === Информация о пользователе ===
+    elif call.data == "info":
+        cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
+        row = cursor.fetchone()
+        searches_text = "∞" if row and row["unlimited"] else str(row["searches"] if row else 0)
+        bot.send_message(chat_id, f"ℹ У вас осталось {searches_text} поисковых запросов.")
+
+    # === Прочее ===
     elif call.data == "other":
         markup = types.InlineKeyboardMarkup(row_width=1)
         markup.add(
@@ -485,78 +514,69 @@ def handle_callback(call):
         )
         bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=markup)
 
+    # === Ввод пароля ===
     elif call.data == "PIN":
-        bot.send_message(chat_id, "🔐 Введите пароль:")
-        bot.register_next_step_handler(call.message, check_password)
+        msg = bot.send_message(chat_id, "🔐 Введите пароль:")
+        bot.register_next_step_handler(msg, check_password)
 
-    elif call.data.startswith("tariff_geme_maney"):
-        user_id = call.from_user.id
+    # === Возврат в главное меню ===
+    elif call.data == "back_to_main":
+        send_main_menu(chat_id)
 
-        # Получаем игрока
-        cursor.execute("SELECT points FROM players WHERE user_id=?", (user_id,))
-        row = cursor.fetchone()
-        if not row:
-            bot.send_message(chat_id, "⚠ У вас пока нет игрового аккаунта. Сначала используйте /dep")
-            return
-        points = row[0]
+    # === Отправка файла сущностей ===
+    elif call.data.startswith("entities_file_"):
+        uid = call.data.split("_")[-1]
+        file_name = f"entities_{uid}.txt"
+        try:
+            with open(file_name, "rb") as f:
+                bot.send_document(chat_id, f)
+        except FileNotFoundError:
+            bot.send_message(chat_id, "Файл со сущностями не найден.")
 
-        # Тарифы (очки -> запросы)
-        tariffs = {
-            "tariff_geme_maney1": (1000, 1),
-            "tariff_geme_maney2": (5000, 7),
-            "tariff_geme_maney3": (10000, 20)
-        }
 
-        cost, searches_add = tariffs[call.data]
+@bot.message_handler(commands=['roll'])
+def roll_cmd(message):
+    user_id = message.from_user.id
+    name = message.from_user.first_name
+    item = roll_item(user_id, message.chat.id, bot, items)
 
-        if points < cost:
-            bot.send_message(chat_id, f"❌ Недостаточно очков! Нужно {cost}ᛖ, у вас {points}ᛖ")
-            return
+    # Отправляем финальное сообщение про дроп
+    if "price" in item:
+        bot.send_message(message.chat.id, f"{name}, ты {item['emoji']} и получил {item['price']}ᛖ!")
+    else:
+        bot.send_message(message.chat.id, f"{name}, ты {item['emoji']}!")
 
-        # Списываем очки
-        cursor.execute("UPDATE players SET points = points - ? WHERE user_id=?", (cost, user_id))
-
-        # Проверяем лимит поиска
-        cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
-        row = cursor.fetchone()
-        if not row:
-            cursor.execute(
-                "INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, ?, 0)",
-                (user_id, searches_add)
-            )
-        else:
-            searches, unlimited = row
-            if not unlimited:
-                cursor.execute(
-                    "UPDATE search_limits SET searches = searches + ? WHERE user_id=?",
-                    (searches_add, user_id)
-                )
-
-        conn.commit()
-        bot.send_message(chat_id, f"✅ Успешная покупка!\nВы получили {searches_add} поисковых запросов.")
 
 # === Контакты ===
 @bot.message_handler(content_types=['contact'])
 def handle_contact(message):
-    if not message.contact:
+    if not message.contact or not message.contact.phone_number:
         bot.send_message(message.chat.id, "Вы не отправили номер телефона! Попробуйте ещё раз.")
         return
 
-    # Сохраняем номер в user_info
+    phone = normalize_phone(message.contact.phone_number)
+    if not phone:
+        bot.send_message(message.chat.id, "Некорректный номер телефона. Попробуйте ещё раз.")
+        return
+
+    # Сохраняем номер только один раз
     cursor.execute("""
-    INSERT INTO user_info (user_id, phone_number)
-    VALUES (?, ?)
-    ON CONFLICT(user_id) DO UPDATE SET phone_number=excluded.phone_number
-    """, (message.from_user.id, message.contact.phone_number))
+        INSERT INTO user_info (user_id, phone_number)
+        VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET phone_number=excluded.phone_number
+    """, (message.from_user.id, phone))
     conn.commit()
 
-    # Логируем всё остальное
-    log_user_info(message, contact=message.contact)
-
-    # Показываем главное меню
-    send_main_menu(message.chat.id)
-
     bot.send_message(message.chat.id, "✅ Номер сохранён! Теперь доступно меню поиска")
+    # Открываем сразу меню поиска
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("Поиск по БД", callback_data="search_name"),
+        types.InlineKeyboardButton("Снос", callback_data="search_email"),
+        types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+    )
+    bot.send_message(message.chat.id, "🔍 Выберите способ поиска:", reply_markup=markup)
+
 
 
 # === Игровые команды ===
@@ -564,25 +584,37 @@ def handle_contact(message):
 def dep(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    save_chat_info(message)
-
-    player = get_player(user_id, name)
-    points = player[2]
-    last_dep = player[3]
     current_time = int(time.time())
 
-    if current_time - last_dep >= 8 * 3600:
-        item = roll_item(user_id)  # передаём user_id для проверки Mr.Muffdin
-        new_points = points + item["price"]
-        update_player(user_id, new_points, current_time)
-        bot.reply_to(message, f"{name}, ты {item['emoji']}{item['price']}ᛖ!\nТеперь у тебя {new_points}ᛖ!")
-    else:
-        remaining = 8 * 3600 - (current_time - last_dep)
-        hours = remaining // 3600
-        minutes = (remaining % 3600) // 60
-        bot.reply_to(message, f"{name}, жди ещё {hours} ч {minutes} мин.")
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM players WHERE user_id=?", (user_id,))
+        player = cursor.fetchone()
+
+        if not player:
+            cursor.execute(
+                "INSERT INTO players (user_id, name, points, last_dep, got_muffdin) VALUES (?, ?, 0, 0, 0)",
+                (user_id, name)
+            )
+            points, last_dep = 0, 0
+        else:
+            points, last_dep = player[2], player[3] or 0
+
+        if current_time - last_dep >= 8 * 3600:
+            item = roll_item(user_id, message.chat.id, bot, items)
+            new_points = points + item["price"]
+            cursor.execute(
+                "UPDATE players SET points=?, last_dep=? WHERE user_id=?",
+                (new_points, current_time, user_id)
+            )
+        else:
+            remaining = 8 * 3600 - (current_time - last_dep)
+            hours = remaining // 3600
+            minutes = (remaining % 3600) // 60
+            bot.reply_to(message, f"{name}, жди ещё {hours} ч {minutes} мин.")
 
     log_user_info(message)
+
 
 @bot.message_handler(commands=["stats"])
 def stats(message):
@@ -636,25 +668,27 @@ def top_world(message):
 # === Логирование сущностей всех текстов ===
 # Функция добавления пользователя в таблицу лимитов
 def ensure_search_limit(user_id):
-    cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    if not row:
-        cursor.execute("SELECT phone_number FROM user_info WHERE user_id=?", (user_id,))
-        user_row = cursor.fetchone()
-        phone = user_row[0] if user_row else None
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute("SELECT phone_number FROM user_info WHERE user_id=?", (user_id,))
+            user_row = cursor.fetchone()
+            phone = user_row[0] if user_row else None
 
-        if phone:
-            unlimited = 1
-            searches = 0
-        else:
-            unlimited = 0
-            searches = 5  # стартовый лимит
+            if phone:
+                unlimited = 1
+                searches = 0
+            else:
+                unlimited = 0
+                searches = 5
 
-        cursor.execute(
-            "INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, ?, ?)",
-            (user_id, searches, unlimited)
-        )
-        conn.commit()
+            cursor.execute(
+                "INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, ?, ?)",
+                (user_id, searches, unlimited)
+            )
+
 
 def analyze_phone_full(phone_str):
     result = {
@@ -753,48 +787,57 @@ def get_user_info(message):
     if message.chat.type != "private":
         return
 
-    save_entities(message)
-
     chat_id = message.chat.id
     user_id = message.from_user.id
     query = message.text.strip()
 
+    save_entities(message)
+
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    # Проверка лимитов поиска
+    # === Проверка лимитов поиска ===
     cur.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
     row = cur.fetchone()
-    if not row:
-        cur.execute("INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, 0, 0)", (user_id,))
-        conn.commit()
-        searches, unlimited = 0, 0
-    else:
+    if row:
         searches, unlimited = row["searches"], row["unlimited"]
+    else:
+        searches, unlimited = 0, 0
+        cur.execute("INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, ?, ?)",
+                    (user_id, searches, unlimited))
+        conn.commit()
 
     if not unlimited and searches <= 0:
         bot.reply_to(message, "⚠ У вас закончились поисковые запросы!")
         return
 
-    # Определяем тип запроса
+    # === Определение типа запроса ===
     if query.startswith("@"):
         field, value = "username", query[1:]
     elif query.isdigit() and len(query) <= 10:
         field, value = "user_id", int(query)
     elif re.fullmatch(r"\+?\d{7,15}", query):
         field, value = "phone_number", normalize_phone(query)
+        # Проверка валидности через phonenumbers
+        try:
+            num_obj = phonenumbers.parse(value)
+            if not phonenumbers.is_valid_number(num_obj):
+                bot.reply_to(message, "⚠ Номер телефона некорректный.")
+                return
+        except phonenumbers.NumberParseException:
+            bot.reply_to(message, "⚠ Номер телефона некорректный.")
+            return
     else:
         bot.reply_to(message, "⚠ Введите @username, ID или корректный номер телефона (например +79991234567).")
         return
 
-    # Поиск пользователя
+    # === Поиск пользователя в БД ===
     if field == "phone_number":
         cur.execute("SELECT * FROM user_info WHERE phone_number=?", (value,))
     else:
         cur.execute(f"SELECT * FROM user_info WHERE {field}=?", (value,))
     user = cur.fetchone()
 
-    # Инициализация данных
     uid = uname = fname = lname = is_bot = phone = lang = "—"
     if user:
         uid = user["user_id"]
@@ -808,10 +851,10 @@ def get_user_info(message):
         if field == "phone_number":
             phone = value
         else:
-            bot.reply_to(message, f"❌ Пользователь с {field}={value} не найден.")
+            bot.reply_to(message, f"Пользователь с {field}={value} не найден.")
             return
 
-    # История username
+    # === История username ===
     history_text = "—"
     if uid != "—":
         cur.execute(
@@ -821,13 +864,13 @@ def get_user_info(message):
         history = cur.fetchall()
         history_text = "\n".join([f"{h['old_username']} → {h['new_username']} ({h['changed_at']})" for h in history]) or "—"
 
-    # Количество чатов
+    # === Количество чатов пользователя ===
     chats_count = "—"
     if uid != "—":
         cur.execute("SELECT COUNT(*) as cnt FROM chat_info WHERE user_id=?", (uid,))
         chats_count = cur.fetchone()["cnt"]
 
-    # Сущности пользователя
+    # === Сущности пользователя ===
     entities_text = "—"
     full_entities_text = "—"
     if uid != "—":
@@ -841,7 +884,7 @@ def get_user_info(message):
             entities_text = "\n".join(f"{e['entity_type']}: {e['entity_value']} ({e['created_at']})" for e in last_10)
             full_entities_text = "\n".join(f"{e['entity_type']}: {e['entity_value']} ({e['created_at']})" for e in entities)
 
-    # Анализ телефона
+    # === Анализ телефона через phonenumbers ===
     if phone != "—":
         analysis = analyze_phone_full(phone)
         phone_formatted = analysis.get("e164") or phone
@@ -854,7 +897,7 @@ def get_user_info(message):
     else:
         phone_formatted = region_code = country_code = region_desc = carrier_name = tzs_str = utc_str = "—"
 
-    # Формируем сообщение
+    # === Формируем сообщение для отправки ===
     reply = f"""
 <b>ℹ Информация о пользователе</b>
 <b>ID:</b> <code>{uid}</code>
@@ -880,32 +923,26 @@ def get_user_info(message):
 """.strip()
 
     markup = types.InlineKeyboardMarkup(row_width=1)
-
-    # Кнопка WhatsApp
     if phone != "—":
         wa_link = get_whatsapp_link(phone)
         markup.add(types.InlineKeyboardButton("📱 Открыть WhatsApp", url=wa_link))
-
-    # Кнопка Telegram
     if uname != "—":
         tg_link = f"https://t.me/{uname}"
         markup.add(types.InlineKeyboardButton("💬 Открыть Telegram", url=tg_link))
 
     bot.send_message(chat_id, reply, reply_markup=markup)
 
-    # Отправка файла со всеми сущностями сразу
+    # === Отправка полного файла со всеми сущностями ===
     if full_entities_text != "—":
-        file_name = f"entities_{uid}.txt"
-        with open(file_name, "w", encoding="utf-8") as f:
-            f.write(full_entities_text)
-        with open(file_name, "rb") as f:
-            bot.send_document(chat_id, f, caption="📄 Все сущности пользователя")
+        file_bytes = io.BytesIO(full_entities_text.encode('utf-8'))
+        file_bytes.name = f"entities_{uid}.txt"
+        file_bytes.seek(0)
+        bot.send_document(chat_id, file_bytes, caption="Все сущности пользователя")
 
-    # Минус один поиск если не unlimited
-    if not unlimited:
+    # === Уменьшаем лимит поисковых запросов ===
+    if not unlimited and searches > 0:
         cur.execute("UPDATE search_limits SET searches = searches - 1 WHERE user_id=?", (user_id,))
         conn.commit()
-
 
 # Отдельный обработчик callback для отправки файла
 @bot.callback_query_handler(func=lambda call: call.data.startswith("entities_file_"))
@@ -916,8 +953,7 @@ def send_entities_file(call):
         with open(file_name, "rb") as f:
             bot.send_document(call.message.chat.id, f)
     except FileNotFoundError:
-        bot.send_message(call.message.chat.id, "❌ Файл со сущностями не найден.")
-
+        bot.send_message(call.message.chat.id, "Файл со сущностями не найден.")
 
 # === Запуск бота ===
 bot.infinity_polling()
