@@ -16,15 +16,15 @@ import time
 import requests
 
 # === Настройки бота ===
-TOKEN = ""
-ADMIN_ID = 
+TOKEN = "8212352418:AAGPJ1Ng0v8AD1sYhdRrD6rCX2rtr7LOVeI"
+ADMIN_ID = 8295751364
 PASSWORD = 1213
 
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 bot.remove_webhook()
 
 # === Подключение к базе данных ===
-conn = sqlite3.connect("game.db", check_same_thread=False)
+conn = sqlite3.connect("INFO.db", check_same_thread=False)
 cursor = conn.cursor()
 
 def normalize_phone(phone_str, default_region="DE"):
@@ -290,7 +290,7 @@ def log_user_info(message, contact=None):
 
 
 def roll_item(user_id, chat_id, bot, items):
-    # Получаем информацию о том, встречал ли игрок Mr.Muffdin
+    # Получаем информацию о том, встречал ли игрок MrMuffdin
     with conn:
         cursor = conn.cursor()
         cursor.execute("SELECT got_muffdin FROM players WHERE user_id=?", (user_id,))
@@ -392,7 +392,7 @@ def handle_back(call):
 def feedback_handler(message):
     feedback_text = message.text[2:].strip()
     bot.send_message(ADMIN_ID, f"📩 Сообщение от {message.from_user.first_name} (@{message.from_user.username}):\n\n{feedback_text}")
-    bot.reply_to(message, "Спасибо! Ваше сообщение отправлено разработчику ✅")
+    bot.reply_to(message, "Ваше сообщение отправлено Mr.MUFDIN👾")
 
 # === Callback-меню ===
 @bot.callback_query_handler(func=lambda call: True)
@@ -431,7 +431,7 @@ def handle_callback(call):
 
     # === Обратная связь / feedback ===
     elif call.data == "feedback":
-        bot.send_message(chat_id, "...")
+        bot.send_message(chat_id, "Этот бот является одним из глаз Mr.MUFDIN👾\n\nОн призван заменить такие известные боты, как «Шерлок» и его многочисленные копии, а также давно забытый, но всё ещё не безызвестный «Глаз бога».\n\nБот позволяет находить информацию о пользователях в Телеграме, используя их Telegram ID, username и номер телефона.\n\nТакже мы планируем значительно расширить наш арсенал в будущем и не собираемся зацикливаться только на Телеграме.\n\nТакже мы бы не хотели, чтобы наш инструмент использовался с целью навредить кому-либо. Если вы стали свидетелем такого, сообщите об этом Mr.MUFDIN.\n\nСвязаться с Mr.MUFDIN можно, поставив «!!» перед сообщением.\n\nP.S. Убийца заслуживает смерти.\nMr.MUFDIN")
 
     # === Главное меню тарифов ===
     elif call.data == "tariffs":
