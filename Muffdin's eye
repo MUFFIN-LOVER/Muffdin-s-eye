@@ -16,9 +16,9 @@ import re
 import time
 import requests
 
-TOKEN = ""
-provider_token = ""
-ADMIN_ID = 
+TOKEN = "8212352418:AAGPJ1Ng0v8AD1sYhdRrD6rCX2rtr7LOVeI"
+provider_token = "2051251535:TEST:OTk5MDA4ODgxLTAwNQ"
+ADMIN_ID = 8295751364
 
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 bot.remove_webhook()
@@ -430,14 +430,6 @@ def update_player(user_id, points=None, last_dep=None):
         elif last_dep is not None:
             cursor.execute("UPDATE players SET last_dep=? WHERE user_id=?", (last_dep, user_id))
 
-@bot.message_handler(commands=['start'])
-def start_command(message):
-    if message.chat.type != "private":
-        bot.reply_to(message, "Команда /start доступна только в личных сообщениях.")
-        return
-
-    log_user_info(message)
-    send_main_menu(message.chat.id)
 
 def send_main_menu(chat_id):
     inline_markup = types.InlineKeyboardMarkup(row_width=1)
