@@ -16,10 +16,9 @@ import re
 import time
 import requests
 
-TOKEN = ""
-provider_token = ""
-ADMIN_ID = 
-PASSWORD = 1213
+TOKEN = "8212352418:AAGPJ1Ng0v8AD1sYhdRrD6rCX2rtr7LOVeI"
+provider_token = "2051251535:TEST:OTk5MDA4ODgxLTAwNQ"
+ADMIN_ID = 8295751364
 
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 bot.remove_webhook()
@@ -43,18 +42,6 @@ def normalize_phone(phone_str):
 def check_password(message):
     user_id = message.from_user.id
     password = message.text.strip()
-
-    if password == str(PASSWORD):
-        with conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                           INSERT INTO search_limits (user_id, searches, unlimited)
-                           VALUES (?, 0, 1) ON CONFLICT(user_id) DO
-                           UPDATE SET unlimited=1
-                           """, (user_id,))
-        bot.reply_to(message, "Пароль верный! У вас безлимитные запросы!✅")
-    else:
-        bot.reply_to(message, "Неверный пароль!❌")
 
 cursor.execute("""
                CREATE TABLE IF NOT EXISTS pending_payments
@@ -92,10 +79,6 @@ cursor.execute("""
                    PRIMARY
                    KEY,
                    searches
-                   INTEGER
-                   DEFAULT
-                   0,
-                   unlimited
                    INTEGER
                    DEFAULT
                    0
@@ -249,6 +232,44 @@ STARS_TARIFFS = {
     "tariff_stars6": {"stars": 2500, "searches": 300},
 }
 
+def give_searches(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Только админ может использовать эту команду")
+        return
+
+    text = message.text.strip()
+    text = re.sub(r'^/give\s*', '', text)  # удаляем команду /give
+
+    match = re.match(r"(?:@?(\w+)\s*)?\+(\d+)", text)
+    if not match:
+        bot.reply_to(message, "❌ Неверный формат. Используйте username +число или +число")
+        return
+
+    username = match.group(1)  # может быть None
+    amount = int(match.group(2))
+
+    if username:
+        cursor.execute("SELECT user_id FROM user_info WHERE LOWER(username)=?", (username.lower(),))
+        row = cursor.fetchone()
+        if not row:
+            bot.reply_to(message, f"❌ Пользователь {username} не найден.")
+            return
+        user_id = row[0]
+    else:
+        user_id = message.from_user.id
+
+    cursor.execute("SELECT searches FROM search_limits WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    if row:
+        new_searches = row[0] + amount
+        cursor.execute("UPDATE search_limits SET searches=? WHERE user_id=?", (new_searches, user_id))
+    else:
+        new_searches = amount
+        cursor.execute("INSERT INTO search_limits (user_id, searches) VALUES (?, ?)", (user_id, new_searches))
+
+    conn.commit()
+    bot.reply_to(message, f"✅ Пользователю добавлено {amount} поисковых запросов. Сейчас у него: {new_searches} запросов.")
+
 def save_user_info(message, contact=None):
     user = message.from_user
     with conn:
@@ -291,22 +312,22 @@ def get_whatsapp_link(phone):
 def save_chat_info(message):
     chat = message.chat
     user = message.from_user
-    with conn:
+    with conn:  # <- используем существующее соединение
         cursor = conn.cursor()
         cursor.execute("""
-                       INSERT INTO chat_info (chat_id, user_id, title, username, type)
-                       VALUES (?, ?, ?, ?, ?) ON CONFLICT(chat_id, user_id) DO
-                       UPDATE SET
-                           title=excluded.title,
-                           username=excluded.username,
-                           type =excluded.type
-                       """, (
-                           chat.id,
-                           user.id,
-                           getattr(chat, "title", None),
-                           getattr(chat, "username", None),
-                           chat.type
-                       ))
+            INSERT INTO chat_info (chat_id, user_id, title, username, type)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                title=excluded.title,
+                username=excluded.username,
+                type=excluded.type
+        """, (
+            int(chat.id),
+            int(user.id),
+            str(getattr(chat, "title", None)),
+            str(getattr(chat, "username", None)),
+            str(chat.type)
+        ))
 
 def save_entities(message):
     if not message.text:
@@ -352,6 +373,10 @@ def save_entities(message):
                 "INSERT INTO user_entities (user_id, entity_type, entity_value) VALUES (?, ?, ?)",
                 unique_entities
             )
+
+@bot.message_handler(commands=['give'])
+def handle_give(message):
+    give_searches(message)
 
 def log_user_info(message, contact=None):
     save_user_info(message, contact)
@@ -500,7 +525,6 @@ def handle_callback(call):
             #types.InlineKeyboardButton("$", callback_data="tariff_money"),
             types.InlineKeyboardButton("Игровая валюта ᛖ", callback_data="tariff_geme_maney"),
             types.InlineKeyboardButton("Telegram Stars⭐", callback_data="tariff_stars"),
-            types.InlineKeyboardButton("PIN🔐", callback_data="PIN"),
             types.InlineKeyboardButton("🔙 Назад", callback_data="adminka")
         )
         bot.send_message(chat_id, "📊 Выберите способ оплаты:", reply_markup=markup)
@@ -517,6 +541,10 @@ def handle_callback(call):
             types.InlineKeyboardButton("🔙 Назад", callback_data="tariffs")
         )
         bot.send_message(chat_id, "📊 Выберите тариф $:", reply_markup=markup)
+
+    elif call.data == "search_name":
+        bot.send_message(chat_id, "Введите имя/ID/username для поиска:")
+        bot.register_next_step_handler_by_chat_id(chat_id, process_search)
 
     elif call.data == "tariff_geme_maney":
         markup = types.InlineKeyboardMarkup(row_width=1)
@@ -556,19 +584,18 @@ def handle_callback(call):
 
         cursor.execute("UPDATE players SET points = points - ? WHERE user_id=?", (cost, user_id))
 
-        cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
+        cursor.execute("SELECT searches FROM search_limits WHERE user_id=?", (user_id,))
         row = cursor.fetchone()
         if row:
-            searches, unlimited = row[0], row[1]
-            if not unlimited:
-                cursor.execute("UPDATE search_limits SET searches = searches + ? WHERE user_id=?",
-                               (searches_add, user_id))
+            searches = row[0]
+            cursor.execute("UPDATE search_limits SET searches = searches + ? WHERE user_id=?",
+                           (searches_add, user_id))
         else:
-            cursor.execute("INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, ?, 0)",
+            cursor.execute("INSERT INTO search_limits (user_id, searches) VALUES (?, ?)",
                            (user_id, searches_add))
 
         conn.commit()
-        bot.send_message(chat_id, f"✅ Успешная покупка!")
+        bot.send_message(chat_id, f"✅ Успешно добавлено {searches_add} поисковых запросов!")
 
     elif call.data.startswith("buy_"):
         tariff_key = call.data.replace("buy_", "")
@@ -588,10 +615,6 @@ def handle_callback(call):
             prices=labeled_price
         )
 
-    elif call.data == "PIN":
-        msg = bot.send_message(chat_id, "🔐 Введите пароль:")
-        bot.register_next_step_handler(msg, check_password)
-
     elif call.data == "feedback":
         bot.send_message(
             chat_id,
@@ -605,11 +628,11 @@ def handle_callback(call):
         )
 
     elif call.data == "info":
-        cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
+        cursor.execute("SELECT searches FROM search_limits WHERE user_id=?", (user_id,))
         row = cursor.fetchone()
         if row:
-            searches_left, unlimited = row[0], row[1]
-            searches_text = "∞" if unlimited else str(searches_left)
+            searches_left = row[0]
+            searches_text = str(searches_left)
         else:
             searches_text = "0"
 
@@ -665,24 +688,20 @@ def got_payment(message):
     searches_add = tariff_info["searches"]
     price_stars = tariff_info["stars"]
 
-    cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
+    cursor.execute("SELECT searches FROM search_limits WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
     if row:
-        searches_current = row[0]
-        unlimited_flag = row[1]
-        if unlimited_flag:
-            bot.send_message(user_id, f"У вас же безлимит😑!")
-        else:
-            new_searches = searches_current + searches_add
-            cursor.execute("UPDATE search_limits SET searches=? WHERE user_id=?", (new_searches, user_id))
-            conn.commit()
-            bot.send_message(user_id,
-                             f"✅ Оплата успешна! Вы получили {searches_add} поисковых запросов. Сейчас у вас: {new_searches} запросов.")
+        new_searches = row[0] + searches_add
+        cursor.execute("UPDATE search_limits SET searches=? WHERE user_id=?", (new_searches, user_id))
     else:
-        cursor.execute("INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, ?, 0)",
-                       (user_id, searches_add))
-        conn.commit()
-        bot.send_message(user_id, f"✅ Оплата успешна! Вы получили {searches_add} поисковых запросов.")
+        new_searches = searches_add
+        cursor.execute("INSERT INTO search_limits (user_id, searches) VALUES (?, ?)", (user_id, new_searches))
+
+    conn.commit()
+    bot.send_message(
+        user_id,
+        f"✅ Оплата успешна! Вы получили {searches_add} поисковых запросов. Сейчас у вас: {new_searches} запросов."
+    )
 
     cursor.execute(
         """
@@ -736,13 +755,13 @@ def handle_contact(message):
                        UPDATE SET phone_number=excluded.phone_number
                        """, (user_id, phone))
 
-        cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
+        cursor.execute("SELECT searches FROM search_limits WHERE user_id=?", (user_id,))
         row = cursor.fetchone()
         if not row:
-            # Новый пользователь → даём 5 бесплатных запросов
+            # Новый пользователь → даём 0 поисковых запросов
             cursor.execute(
-                "INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, ?, ?)",
-                (user_id, 5, 0)
+                "INSERT INTO search_limits (user_id, searches) VALUES (?, ?)",
+                (user_id, 0)
             )
 
     bot.send_message(message.chat.id, "✅ Номер сохранён! Теперь у вас доступны поисковые запросы.")
@@ -750,7 +769,6 @@ def handle_contact(message):
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
         types.InlineKeyboardButton("Поиск по БД", callback_data="search_name"),
-        types.InlineKeyboardButton("Снос", callback_data="search_email"),
         types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
     )
     bot.send_message(message.chat.id, "🔍 Выберите способ поиска:", reply_markup=markup)
@@ -848,23 +866,13 @@ def top_world(message):
 def ensure_search_limit(user_id):
     with conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
+        cursor.execute("SELECT searches FROM search_limits WHERE user_id=?", (user_id,))
         row = cursor.fetchone()
         if not row:
-            cursor.execute("SELECT phone_number FROM user_info WHERE user_id=?", (user_id,))
-            user_row = cursor.fetchone()
-            phone = user_row[0] if user_row else None
-
-            if phone:
-                unlimited = 1
-                searches = 0
-            else:
-                unlimited = 0
-                searches = 5
-
+            # Новый пользователь → даём 0 поисковых запросов
             cursor.execute(
-                "INSERT INTO search_limits (user_id, searches, unlimited) VALUES (?, ?, ?)",
-                (user_id, searches, unlimited)
+                "INSERT INTO search_limits (user_id, searches) VALUES (?, ?)",
+                (user_id, 0)
             )
 
 def analyze_phone_full(phone_str):
@@ -1009,15 +1017,15 @@ def process_search(message, query):
         bot.reply_to(message, "⚠ Введите @username, ID или корректный номер телефона.")
         return
 
-    cur.execute("SELECT searches, unlimited FROM search_limits WHERE user_id=?", (user_id,))
+    cur.execute("SELECT searches FROM search_limits WHERE user_id=?", (user_id,))
     row = cur.fetchone()
     if not row:
         bot.reply_to(message, "⚠ Сначала зарегистрируйтесь!")
         return
 
-    searches, unlimited = row["searches"], row["unlimited"]
-    if not unlimited and searches <= 0:
-        bot.reply_to(message, "У вас нету поисковых запросы!")
+    searches = row["searches"]
+    if searches <= 0:
+        bot.reply_to(message, "У вас нет поисковых запросов!")
         return
 
     if field == "username":
@@ -1140,4 +1148,3 @@ def process_search(message, query):
 
 if __name__ == "__main__":
     bot.infinity_polling()
-
