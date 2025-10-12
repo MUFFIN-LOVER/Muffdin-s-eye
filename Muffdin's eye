@@ -17,9 +17,9 @@ import re
 import time
 import requests
 
-TOKEN = "8212352418:AAGPJ1Ng0v8AD1sYhdRrD6rCX2rtr7LOVeI"
-provider_token = "2051251535:TEST:OTk5MDA4ODgxLTAwNQ"
-ADMIN_ID = 8295751364
+TOKEN = ""
+provider_token = ""
+ADMIN_ID = 
 
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 bot.remove_webhook()
