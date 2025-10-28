@@ -245,14 +245,14 @@ def give_searches(message):
         return
 
     text = message.text.strip()
-    text = re.sub(r'^/give\s*', '', text)  # удаляем команду /give
+    text = re.sub(r'^/give\s*', '', text)
 
     match = re.match(r"(?:@?(\w+)\s*)?\+(\d+)", text)
     if not match:
         bot.reply_to(message, "Неверный формат. Используйте username +число или +число")
         return
 
-    username = match.group(1)  # может быть None
+    username = match.group(1)
     amount = int(match.group(2))
 
     if username:
@@ -465,7 +465,6 @@ def handle_back(call):
     user_id = call.from_user.id
     chat_id = call.message.chat.id
 
-    # Проверяем номер телефона
     cursor.execute("SELECT phone_number FROM user_info WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
     phone_saved = row and row[0]
@@ -630,8 +629,7 @@ def handle_callback(call):
             "Бот позволяет находить информацию о пользователях в Телеграме, используя их Telegram ID, username и номер телефона.\n\n"
             "Также мы планируем значительно расширить наш арсенал в будущем и не собираемся зацикливаться только на Телеграме.\n\n"
             "Также мы бы не хотели, чтобы наш инструмент использовался с целью навредить кому-либо. Если вы стали свидетелем такого, сообщите об этом Mr.MUFDIN.\n\n"
-            "Связаться с Mr.MUFDIN можно, поставив «!!» перед сообщением.\n\n"
-            "P.S. Убийца заслуживает смерти.\nMr.MUFDIN"
+            "Связаться с Mr.MUFDIN можно, поставив «!!» перед сообщением."
         )
 
     elif call.data == "info":
@@ -1015,7 +1013,6 @@ def process_search(message, query=None):
     user_id_requestor = message.from_user.id
     chat_id = message.chat.id
 
-    # Проверяем, есть ли у пользователя поисковые лимиты
     cur = conn.cursor()
     cur.execute("SELECT searches FROM search_limits WHERE user_id=?", (user_id_requestor,))
     row = cur.fetchone()
@@ -1029,11 +1026,11 @@ def process_search(message, query=None):
     field = None
     value = None
 
-    if query.startswith("@"):  # username
+    if query.startswith("@"):
         field = "username"
         value = query[1:].split()[0].split("@")[0].lower()
 
-    elif re.fullmatch(r'-?\d+', query):  # числовой user_id (включая отрицательные)
+    elif re.fullmatch(r'-?\d+', query):
         field = "user_id"
         try:
             value = int(query)
@@ -1041,7 +1038,7 @@ def process_search(message, query=None):
             bot.reply_to(message, "⚠ Неверный формат ID.")
             return
 
-    elif re.fullmatch(r'\+?\d[\d\s\-\(\)]{5,}\d', query):  # телефон
+    elif re.fullmatch(r'\+?\d[\d\s\-\(\)]{5,}\d', query): 
         field = "phone_number"
         normalized = normalize_phone(query)
         if not normalized:
@@ -1166,7 +1163,6 @@ def process_search(message, query=None):
 
     cur.execute("UPDATE search_limits SET searches = searches - 1 WHERE user_id=?", (user_id_requestor,))
     conn.commit()
-
 
 if __name__ == "__main__":
     bot.infinity_polling()
