@@ -1,66 +1,67 @@
+
 # Muffdin's Eye
 
-**Muffdin's Eye** — это телеграм-бот, который позволяет находить информацию о пользователях Telegram, используя их ID, username и номер телефона.  
-Бот собирает данные о пользователях, их чатах, истории username и других сущностях, которые они оставляют в текстах, сообщениях и ссылках.  
-Помимо функционала поиска, бот включает игровую систему с очками, ежедневным получением очков и случайными событиями, которые делают использование более увлекательным.
+**Muffdin's Eye** is a Telegram bot that allows you to find information about Telegram users using their ID, username, or phone number.  
+The bot collects data about users, their chats, username history, and other entities they leave in texts, messages, and links.  
+In addition to search functionality, the bot includes a gaming system with points, daily point collection, and random events that make using the bot more engaging.
 
-## Зачем использовать Muffdin's Eye
-- Получение детальной информации о пользователях Telegram
-- Быстрый поиск по ID, username и телефону
-- История активности и сущностей пользователя
-- Система очков и развлечений, чтобы вовлечь пользователей
-- Простая настройка и использование
+## Why use Muffdin's Eye
+- Obtain detailed information about Telegram users
+- Quick search by ID, username, or phone number
+- User activity history and entities
+- Points and entertainment system to engage users
+- Easy setup and usage
 
-## **Собираемые данные**
+## **Collected Data**
 
-**Телеграм-профиль пользователя:**
-- ID пользователя
+**Telegram user profile:**
+- User ID
 - Username
-- Имя и фамилия
-- Язык интерфейса
-- Является ли ботом
-- Номер телефона (если пользователь предоставил)
+- First and last name
+- Interface language
+- Bot status
+- Phone number (if provided by the user)
 
-**Чаты пользователя:**
-- ID чата
-- Название чата
-- Username чата
-- Тип чата (групповой, личный, канал)
-- История изменений username
+**User chats:**
+- Chat ID
+- Chat name
+- Chat username
+- Chat type (group, private, channel)
+- Username change history
 
-**Сущности из сообщений:**
-- URL
-- Email
-- Телефонные номера
+**Entities from messages:**
+- URLs
+- Emails
+- Phone numbers
 
-**Игровые данные:**
-- Очки (ᛖ)
-- Последний деп
-- Флаг встреч с особым событием (Mr.Muffdin)
+**Gaming data:**
+- Points (ᛖ)
+- Last deposit
+- Special event flag (Mr.Muffdin)
 
-## **Выводимая информация**
+## **Displayed Information**
 
-**Основная информация о пользователе:**
-- ID, username, имя, фамилия
-- Язык
-- Количество чатов
+**Basic user information:**
+- ID, username, first and last name
+- Language
+- Number of chats
 
-**Телефон:**
-- Форматированный номер (E.164)
-- Страна и регион
-- Код страны
-- Региональное описание
-- Оператор
-- Таймзона и смещение UTC
+**Phone:**
+- Formatted number (E.164)
+- Country and region
+- Country code
+- Regional description
+- Carrier
+- Timezone and UTC offset
 
-**Чаты пользователя:** список последних чатов
+**User chats:** list of recent chats
 
-**История username:** предыдущие и новые username с датой изменения
+**Username history:** previous and new usernames with change dates
 
-**Последние сущности пользователя:** до 10 последних URL/email/телефон
+**Recent user entities:** up to 10 recent URLs/emails/phone numbers
 
-**Ссылки для связи:**
+**Contact links:**
 - Telegram
-- WhatsApp (если номер телефона известен)
+- WhatsApp (if phone number is known)
 
-**Игровая информация:** очки пользователя (ᛖ), возможность депа, топ игроков.
+**Gaming information:** user points (ᛖ), ability to deposit, top players.
